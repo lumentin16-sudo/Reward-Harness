@@ -1,0 +1,39 @@
+"""Interface-bounded reward-harness reference experiment."""
+
+from .reward_system import (
+    Candidate,
+    ComparisonResult,
+    CriterionJudgment,
+    LLMCallable,
+    ModelCallRecord,
+    Preference,
+    RewardResult,
+    Skill,
+    SkillInput,
+    SkillRegistry,
+    SkillResult,
+    RewardSystem,
+    RewardTask,
+    Rubric,
+    RubricSet,
+    TraceEvent,
+)
+
+__all__ = [
+    "Candidate",
+    "ComparisonResult",
+    "CriterionJudgment",
+    "LLMCallable",
+    "ModelCallRecord",
+    "Preference",
+    "RewardResult",
+    "Skill",
+    "SkillInput",
+    "SkillRegistry",
+    "SkillResult",
+    "RewardSystem",
+    "RewardTask",
+    "Rubric",
+    "RubricSet",
+    "TraceEvent",
+]

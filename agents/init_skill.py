@@ -177,37 +177,6 @@ class InitSkillHarness(RewardSystem):
             )
         )
 
-    @staticmethod
-    def _task_payload(task: RewardTask) -> dict:
-        return {
-            "task_id": task.task_id,
-            "instruction": task.instruction,
-            "context": task.context,
-            "domain": task.domain,
-            "metadata": dict(task.metadata),
-        }
-
-    @staticmethod
-    def _rubrics_payload(rubrics: RubricSet) -> list[dict]:
-        return [
-            {
-                "rubric_id": rubric.rubric_id,
-                "criterion": rubric.criterion,
-            }
-            for rubric in rubrics.rubrics
-        ]
-
-    @staticmethod
-    def _skill_results_payload(results: tuple[SkillResult, ...]) -> list[dict]:
-        return [
-            {
-                "name": result.skill_name,
-                "content": result.content,
-                "metadata": dict(result.metadata),
-            }
-            for result in results
-        ]
-
     def build_rubrics(self, task: RewardTask) -> RubricSet:
         """由 Rubric Model 选择 Skill，再生成共享 RubricSet。"""
 
@@ -281,7 +250,7 @@ class InitSkillHarness(RewardSystem):
         registry = self.get_skill_registry(task)
         task_payload = self._task_payload(task)
         rubrics_payload = self._rubrics_payload(rubrics)
-        candidate_payload = {"content": candidate.content}
+        candidate_payload = self._candidate_payload(candidate)
         selection_prompt = self.judge_skill_selection_prompt.format(
             task_json=json.dumps(task_payload, ensure_ascii=False, indent=2),
             rubrics_json=json.dumps(rubrics_payload, ensure_ascii=False, indent=2),

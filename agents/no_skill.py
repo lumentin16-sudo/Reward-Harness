@@ -84,13 +84,7 @@ class NoSkillHarness(RewardSystem):
         return SkillRegistry()
 
     def build_rubrics(self, task: RewardTask) -> RubricSet:
-        task_payload = {
-            "task_id": task.task_id,
-            "instruction": task.instruction,
-            "context": task.context,
-            "domain": task.domain,
-            "metadata": dict(task.metadata),
-        }
+        task_payload = self._task_payload(task)
         prompt = self.rubric_prompt_template.format(
             task_json=json.dumps(task_payload, ensure_ascii=False, indent=2)
         )
@@ -119,19 +113,9 @@ class NoSkillHarness(RewardSystem):
         candidate: Candidate,
         rubrics: RubricSet,
     ) -> RewardResult:
-        task_payload = {
-            "instruction": task.instruction,
-            "context": task.context,
-            "domain": task.domain,
-        }
-        rubrics_payload = [
-            {
-                "rubric_id": rubric.rubric_id,
-                "criterion": rubric.criterion,
-            }
-            for rubric in rubrics.rubrics
-        ]
-        candidate_payload = {"content": candidate.content}
+        task_payload = self._task_payload(task)
+        rubrics_payload = self._rubrics_payload(rubrics)
+        candidate_payload = self._candidate_payload(candidate)
         prompt = self.judge_prompt_template.format(
             task_json=json.dumps(task_payload, ensure_ascii=False, indent=2),
             rubrics_json=json.dumps(rubrics_payload, ensure_ascii=False, indent=2),

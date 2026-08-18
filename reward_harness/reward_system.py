@@ -5,12 +5,12 @@
 1. 定义任务、候选回答、Rubric、Skill 和评分结果的数据结构；
 2. 限制 Rubric 生成阶段（G）和 Judge 阶段（J）各自可见的信息；
 3. 将内部对象转换成稳定的 Prompt payload，并解析模型返回的 JSON；
-4. 校验候选输出和最终奖励，并提供统一的 A/B 比较流程；
+4. 校验 Harness 输出、Rubric 覆盖关系和最终奖励；
 5. 保持业务结果可序列化，完整执行轨迹由 benchmark runner 统一记录。
 
 候选 Harness 的搜索边界只有三个公开接口：
 ``get_skill_registry``、``build_rubrics`` 和 ``score``。候选可以自由设计
-Skill、Prompt、G/J 调用流程和奖励聚合策略，但不能修改 payload 与比较协议。
+Skill、Prompt、G/J 调用流程和奖励聚合策略，但不能修改公共 payload 协议。
 """
 
 from __future__ import annotations
@@ -20,8 +20,7 @@ import math
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, ClassVar, Mapping, Protocol, Sequence, final
+from typing import Any, ClassVar, Mapping, Protocol, final
 
 
 # ---------------------------------------------------------------------------
@@ -183,10 +182,10 @@ class Rubric:
 
 @dataclass(frozen=True, slots=True)
 class RubricSet:
-    """同一任务下由 A/B 两个回答共享的 Rubric 集合。
+    """同一 Query 下由全部 Response 共享的 Rubric 集合。
 
-    ``compare`` 只生成一次 RubricSet，并把同一个对象分别传给两次 ``score``，
-    防止候选 A 和 B 因评价标准不同而失去可比性。
+    Benchmark 每题只生成一次 RubricSet，并把同一个对象传给每次 ``score``，
+    防止不同 Response 因评价标准不同而失去可比性。
     """
 
     query_id: str  # Rubric 所属任务
@@ -313,35 +312,6 @@ class RewardResult:
         _json_safe(dict(self.metadata), "metadata")
 
 
-class Preference(str, Enum):
-    """由 A/B 两个标量奖励推导出的离散偏好。"""
-
-    A = "a"
-    B = "b"
-    TIE = "tie"
-
-
-@dataclass(frozen=True, slots=True)
-class EvaluationResult:
-    """一条任务在共享 Rubric 下的完整多候选评分结果。"""
-
-    query_id: str
-    rubric_set: RubricSet
-    results: tuple[RewardResult, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ComparisonResult:
-    """共享 Rubric 下的一次完整 A/B 比较结果。"""
-
-    query_id: str
-    rubric_set: RubricSet
-    result_a: RewardResult
-    result_b: RewardResult
-    preference: Preference
-    reward_margin: float
-
-
 # ---------------------------------------------------------------------------
 # Reward Harness 稳定接口与公共控制流程
 # ---------------------------------------------------------------------------
@@ -357,7 +327,7 @@ class RewardSystem(ABC):
     固定部分：
         - 输入 payload 与 JSON 输出协议；
         - Rubric 覆盖、结果绑定和最终 reward 范围校验；
-        - 共享 Rubric 的 A/B 比较和 tie 判定。
+        - Query、Response、Rubric 和 RewardResult 的绑定关系。
 
     原始 Judge 分数尺度和聚合方式属于 Harness 的 ``score`` 实现；所有 Harness
     只需把最终 ``RewardResult.reward`` 归一化到 [0, 1]。
@@ -372,8 +342,6 @@ class RewardSystem(ABC):
         super().__init_subclass__(**kwargs)
         # @final 主要服务静态检查；这里再做运行时检查，防止生成代码绕过约束。
         fixed_methods = {
-            "evaluate",
-            "compare",
             "_task_payload",
             "_candidate_payload",
             "_rubrics_payload",
@@ -391,17 +359,11 @@ class RewardSystem(ABC):
         self,
         rubric_llm: LLMCallable,
         judge_llm: LLMCallable,
-        *,
-        tie_tolerance: float = 0.0,
     ) -> None:
-        """注入冻结的 Rubric/Judge 模型，并配置统一 tie 阈值。"""
+        """注入冻结的 Rubric Model 和 Judge Model。"""
 
-        _require_finite(tie_tolerance, "tie_tolerance")
-        if tie_tolerance < 0:
-            raise ValueError("tie_tolerance must be non-negative")
         self._rubric_llm = rubric_llm
         self._judge_llm = judge_llm
-        self._tie_tolerance = tie_tolerance
 
     @property
     def rubric_llm(self) -> LLMCallable:
@@ -606,77 +568,6 @@ class RewardSystem(ABC):
                 f"judgments must cover every shared rubric; missing={missing}, extra={extra}"
             )
         return tuple(parsed[rubric.rubric_id] for rubric in rubrics.rubrics)
-
-    @final
-    def evaluate(
-        self,
-        task: Query,
-        candidates: Sequence[Response],
-    ) -> EvaluationResult:
-        """生成一次共享 Rubric，并依次为全部候选评分。
-
-        这是面向普通调用方的完整评估入口。底层 ``build_rubrics`` 和
-        ``score`` 仍保持独立，便于 benchmark 使用固定 Rubric、缓存 Rubric，
-        或对单个候选执行精细的并发与失败重试。
-        """
-
-        candidate_tuple = tuple(candidates)
-        if not candidate_tuple:
-            raise ValueError("evaluate requires at least one candidate")
-        response_ids = [candidate.response_id for candidate in candidate_tuple]
-        if len(response_ids) != len(set(response_ids)):
-            raise ValueError("candidate ids must be distinct")
-
-        # G：每条任务只生成一次，所有候选严格共享同一个 RubricSet 对象。
-        rubrics = self.build_rubrics(task)
-        RewardSystem._validate_rubric_set(self, task, rubrics)
-
-        results: list[RewardResult] = []
-        for candidate in candidate_tuple:
-            result = self.score(task, candidate, rubrics)
-            RewardSystem._validate_reward_result(task, candidate, rubrics, result)
-            results.append(result)
-
-        return EvaluationResult(
-            query_id=task.query_id,
-            rubric_set=rubrics,
-            results=tuple(results),
-        )
-
-    @final
-    def compare(
-        self,
-        task: Query,
-        candidate_a: Response,
-        candidate_b: Response,
-    ) -> ComparisonResult:
-        """执行一次完整、pointwise 且共享 Rubric 的 A/B 比较。
-
-        固定顺序为：生成 Rubric → 评分 A → 评分 B → 校验 → 计算偏好。
-        ``score`` 每次只能看到当前候选，不能直接比较 A/B 文本。
-        """
-
-        evaluation = self.evaluate(task, (candidate_a, candidate_b))
-        rubrics = evaluation.rubric_set
-        result_a, result_b = evaluation.results
-
-        # A：tie_tolerance 把足够接近的两个标量奖励映射为平局。
-        margin = result_a.reward - result_b.reward
-        if abs(margin) <= self._tie_tolerance:
-            preference = Preference.TIE
-        elif margin > 0:
-            preference = Preference.A
-        else:
-            preference = Preference.B
-
-        return ComparisonResult(
-            query_id=task.query_id,
-            rubric_set=rubrics,
-            result_a=result_a,
-            result_b=result_b,
-            preference=preference,
-            reward_margin=margin,
-        )
 
     def _validate_rubric_set(self, task: Query, rubrics: RubricSet) -> None:
         """校验候选生成的 RubricSet 是否属于当前任务且数量合规。"""

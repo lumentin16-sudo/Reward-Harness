@@ -209,18 +209,7 @@ class MyHarness(RewardSystem):
 
 `RewardSystem` 不规定 Judge 原始分数的尺度或聚合公式。Harness 在 `score()` 中自行解析 Judgment、执行聚合并生成 `RewardResult`；例如可以使用 0～5 加权平均、0～10 平均、最低项或硬约束策略。公共协议只要求每条 Rubric 恰好有一项 Judgment，并且最终 `RewardResult.reward` 归一化到 `[0,1]`。
 
-评测调用方通常只需要调用统一入口：
-
-```python
-evaluation = harness.evaluate(task, candidates)
-```
-
-`evaluate()` 会负责：
-
-1. 调用一次 `build_rubrics(task)`；
-2. 使用同一个 `RubricSet` 调用每个候选的 `score()`；
-3. 校验 task、candidate、rubric 和结果之间的一致性；
-4. 返回包含共享 Rubric 和全部候选结果的 `EvaluationResult`。
+Benchmark runner 直接编排这三个接口：每条 Query 调用一次 `build_rubrics()`，再用同一个 `RubricSet` 并发调用每个 Response 的 `score()`。这样 runner 可以统一处理分阶段重试、结果校验、完整轨迹和中断续跑。
 
 把新的实现保存为 `reward_harness/agents/my_harness.py` 后，runner 会自动发现其中的 `RewardSystem` 子类。文件名 `my_harness` 就是 `--agents my_harness` 使用的名称。`__init__.py` 和以下划线开头的文件不会被扫描。
 

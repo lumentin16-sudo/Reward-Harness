@@ -10,10 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..reward_system import Candidate, JSONValue, RewardTask
+from ..reward_system import Response, JSONValue, Query
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
 
 
@@ -23,8 +23,8 @@ class BenchmarkCase:
 
     case_id: str
     group: str
-    task: RewardTask
-    candidates: tuple[Candidate, ...]
+    task: Query
+    candidates: tuple[Response, ...]
     gold: Mapping[str, JSONValue] = field(default_factory=dict)
 
 
@@ -106,8 +106,8 @@ def benchmark_case_from_dict(value: Mapping[str, Any]) -> BenchmarkCase:
     return BenchmarkCase(
         case_id=str(value["case_id"]),
         group=str(value["group"]),
-        task=RewardTask(**dict(task_value)),
-        candidates=tuple(Candidate(**dict(item)) for item in candidate_values),
+        task=Query(**dict(task_value)),
+        candidates=tuple(Response(**dict(item)) for item in candidate_values),
         gold=dict(value.get("gold", {})),
     )
 
@@ -205,7 +205,7 @@ def read_processed_cases(
 
 
 def public_text(value: Any) -> str:
-    """把字符串或 chat messages 规范成 RewardTask/Candidate 的公开文本。"""
+    """把字符串或 chat messages 规范成 Query/Response 的公开文本。"""
 
     if isinstance(value, str):
         return value

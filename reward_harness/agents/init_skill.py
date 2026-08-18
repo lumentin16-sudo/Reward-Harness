@@ -1,20 +1,18 @@
-"""使用可自由选择原子 Skill 的第一版 Reward Harness 候选。"""
+"""使用可自由选择 workflow Skill 的第一版 Reward Harness 候选。"""
 
 from __future__ import annotations
 
 import json
 
 from ..reward_system import (
-    Candidate,
+    Response,
+    RubricJudgment,
     RewardResult,
     RewardSystem,
-    RewardTask,
+    Query,
     RubricSet,
     Skill,
-    SkillInput,
     SkillRegistry,
-    SkillResult,
-    TraceEvent,
 )
 
 
@@ -34,13 +32,13 @@ Select zero or more useful skills. Return JSON only:
 RUBRIC_GENERATION_PROMPT = """You are a rubric-generation model.
 
 Generate task-specific evaluation rubrics using only the public task and the
-selected skill results. Candidate answers are intentionally unavailable.
+selected workflow skills. Response answers are intentionally unavailable.
 
 [Public Task]
 {task_json}
 
-[Selected Skill Results]
-{skill_results_json}
+[Selected Workflow Skills]
+{skills_json}
 
 Requirements:
 - Return 2 to 6 non-overlapping rubrics.
@@ -68,7 +66,7 @@ JUDGE_SKILL_SELECTION_PROMPT = """Select skills for pointwise rubric scoring.
 [Shared Rubrics]
 {rubrics_json}
 
-[Current Candidate]
+[Current Response]
 {candidate_json}
 
 [Available Skills]
@@ -90,16 +88,16 @@ with another answer and do not infer its position in a preference pair.
 [Shared Rubrics]
 {rubrics_json}
 
-[Selected Skill Results]
-{skill_results_json}
+[Selected Workflow Skills]
+{skills_json}
 
-[Candidate]
+[Response]
 {candidate_json}
 
 Requirements:
 - Return exactly one judgment for every rubric_id.
 - score must be an integer from 0 to 5.
-- Skill results are supporting knowledge; scores must still be based on the rubrics.
+- Workflow skills are guidance; scores must still be based on the rubrics.
 - evidence must quote or briefly identify observable candidate content.
 - Return JSON only, with this schema:
 {{
@@ -115,47 +113,33 @@ Requirements:
 """
 
 
-class TaskObjectiveSkill(Skill):
-    name = "task_objective"
-    description = "Clarify the user's objective and observable task success."
+TASK_OBJECTIVE_SKILL = Skill(
+    name="task_objective",
+    description="Clarify the user's objective and observable task success.",
+    content=(
+        "Focus on the user's actual objective, observable correctness, and task "
+        "completion rather than surface style or verbosity."
+    ),
+)
 
-    def invoke(self, context: SkillInput) -> SkillResult:
-        return SkillResult(
-            skill_name=self.name,
-            content=(
-                "Focus on the user's actual objective, observable correctness, and "
-                f"task completion. Task: {context.task.instruction}"
-            ),
-        )
+CONSTRAINT_ANALYSIS_SKILL = Skill(
+    name="constraint_analysis",
+    description="Identify explicit format, content, and prohibited-behavior constraints.",
+    content=(
+        "Check every explicit requirement independently. Treat requested format and "
+        "prohibited behavior as constraints, without inventing new ones."
+    ),
+)
 
-
-class ConstraintAnalysisSkill(Skill):
-    name = "constraint_analysis"
-    description = "Identify explicit format, content, and prohibited-behavior constraints."
-
-    def invoke(self, context: SkillInput) -> SkillResult:
-        return SkillResult(
-            skill_name=self.name,
-            content=(
-                "Check every explicit requirement independently. Treat requested format "
-                "and prohibited behavior as constraints, without inventing new ones."
-            ),
-        )
-
-
-class PointwiseEvidenceSkill(Skill):
-    name = "pointwise_evidence"
-    description = "Ground rubric scoring in observable evidence from one candidate."
-
-    def invoke(self, context: SkillInput) -> SkillResult:
-        if context.candidate is None:
-            content = "Write criteria that can later be checked from one candidate at a time."
-        else:
-            content = (
-                "For each rubric, identify observable supporting or contradicting content "
-                "in the current candidate before assigning an integer score."
-            )
-        return SkillResult(skill_name=self.name, content=content)
+POINTWISE_EVIDENCE_SKILL = Skill(
+    name="pointwise_evidence",
+    description="Ground rubric scoring in observable evidence from one candidate.",
+    content=(
+        "Use criteria that can be checked from one candidate at a time. For each "
+        "criterion, identify observable supporting or contradicting evidence before "
+        "assigning a score."
+    ),
+)
 
 
 class InitSkillHarness(RewardSystem):
@@ -166,18 +150,39 @@ class InitSkillHarness(RewardSystem):
     judge_skill_selection_prompt = JUDGE_SKILL_SELECTION_PROMPT
     judge_prompt_template = RUBRIC_EVALUATION_PROMPT
 
-    def get_skill_registry(self, task: RewardTask) -> SkillRegistry:
-        """候选可以自由增加、删除或重命名这里注册的原子 Skill。"""
+    def get_skill_registry(self, task: Query) -> SkillRegistry:
+        """候选可以自由增加、删除或重命名这里注册的 workflow Skill。"""
 
         return SkillRegistry(
             (
-                TaskObjectiveSkill(),
-                ConstraintAnalysisSkill(),
-                PointwiseEvidenceSkill(),
+                TASK_OBJECTIVE_SKILL,
+                CONSTRAINT_ANALYSIS_SKILL,
+                POINTWISE_EVIDENCE_SKILL,
             )
         )
 
-    def build_rubrics(self, task: RewardTask) -> RubricSet:
+    @staticmethod
+    def aggregate(
+        judgments: tuple[RubricJudgment, ...],
+        rubrics: RubricSet,
+    ) -> float:
+        """按本 Harness 的 0～5 评分协议执行加权平均并归一化。"""
+
+        if not judgments:
+            raise ValueError("cannot aggregate an empty judgment set")
+        for judgment in judgments:
+            if not isinstance(judgment.score, int) or not 0 <= judgment.score <= 5:
+                raise ValueError("init_skill expects integer scores in [0, 5]")
+
+        judgment_by_id = {judgment.rubric_id: judgment for judgment in judgments}
+        total_weight = sum(rubric.weight for rubric in rubrics.rubrics)
+        weighted_score = sum(
+            rubric.weight * judgment_by_id[rubric.rubric_id].score
+            for rubric in rubrics.rubrics
+        )
+        return weighted_score / (5.0 * total_weight)
+
+    def build_rubrics(self, task: Query) -> RubricSet:
         """由 Rubric Model 选择 Skill，再生成共享 RubricSet。"""
 
         registry = self.get_skill_registry(task)
@@ -190,15 +195,12 @@ class InitSkillHarness(RewardSystem):
         )
         raw_selection = self.rubric_llm(selection_prompt)
         skill_calls = self._parse_skill_calls(raw_selection, registry)
-        skill_results = registry.invoke(
-            skill_calls,
-            SkillInput(component="G", task=task),
-        )
+        selected_skills = registry.select(skill_calls)
 
         prompt = self.rubric_prompt_template.format(
             task_json=json.dumps(task_payload, ensure_ascii=False, indent=2),
-            skill_results_json=json.dumps(
-                self._skill_results_payload(skill_results),
+            skills_json=json.dumps(
+                self._skills_payload(selected_skills),
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -206,43 +208,19 @@ class InitSkillHarness(RewardSystem):
         raw_response = self.rubric_llm(prompt)
         rubrics = self._parse_rubrics(raw_response)
 
-        skill_trace = tuple(
-            TraceEvent(
-                component="G",
-                name="skill_called",
-                payload={"skill_name": result.skill_name},
-            )
-            for result in skill_results
-        )
         return RubricSet(
-            task_id=task.task_id,
+            query_id=task.query_id,
             rubrics=rubrics,
-            trace=(
-                TraceEvent(
-                    component="G",
-                    name="skills_selected",
-                    payload={"skill_names": list(skill_calls)},
-                ),
-            )
-            + skill_trace
-            + (
-                TraceEvent(
-                    component="G",
-                    name="rubrics_generated",
-                    payload={"rubric_count": len(rubrics)},
-                ),
-            ),
             metadata={
                 "selected_skills": list(skill_calls),
-                "raw_skill_selection": raw_selection,
-                "raw_rubric_response": raw_response,
+                "skills": self._skills_payload(selected_skills),
             },
         )
 
     def score(
         self,
-        task: RewardTask,
-        candidate: Candidate,
+        task: Query,
+        candidate: Response,
         rubrics: RubricSet,
     ) -> RewardResult:
         """由 Reward Model 选择 Skill，再依据共享 Rubric 为单个候选评分。"""
@@ -261,21 +239,13 @@ class InitSkillHarness(RewardSystem):
         )
         raw_selection = self.judge_llm(selection_prompt)
         skill_calls = self._parse_skill_calls(raw_selection, registry)
-        skill_results = registry.invoke(
-            skill_calls,
-            SkillInput(
-                component="J",
-                task=task,
-                rubrics=rubrics,
-                candidate=candidate,
-            ),
-        )
+        selected_skills = registry.select(skill_calls)
 
         prompt = self.judge_prompt_template.format(
             task_json=json.dumps(task_payload, ensure_ascii=False, indent=2),
             rubrics_json=json.dumps(rubrics_payload, ensure_ascii=False, indent=2),
-            skill_results_json=json.dumps(
-                self._skill_results_payload(skill_results),
+            skills_json=json.dumps(
+                self._skills_payload(selected_skills),
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -285,43 +255,14 @@ class InitSkillHarness(RewardSystem):
         judgments = self._parse_judgments(raw_response, rubrics)
         reward = self.aggregate(judgments, rubrics)
 
-        skill_trace = tuple(
-            TraceEvent(
-                component="J",
-                name="skill_called",
-                payload={"skill_name": result.skill_name},
-            )
-            for result in skill_results
-        )
         return RewardResult(
-            task_id=task.task_id,
-            candidate_id=candidate.candidate_id,
+            query_id=task.query_id,
+            response_id=candidate.response_id,
             reward=reward,
             judgments=judgments,
-            trace=(
-                TraceEvent(
-                    component="J",
-                    name="skills_selected",
-                    payload={"skill_names": list(skill_calls)},
-                ),
-            )
-            + skill_trace
-            + (
-                TraceEvent(
-                    component="J",
-                    name="candidate_scored",
-                    payload={"judgment_count": len(judgments)},
-                ),
-                TraceEvent(
-                    component="A",
-                    name="weighted_mean_aggregated",
-                    payload={"reward": reward},
-                ),
-            ),
             metadata={
                 "aggregation": "weighted_mean",
                 "selected_skills": list(skill_calls),
-                "raw_skill_selection": raw_selection,
-                "raw_judge_response": raw_response,
+                "skills": self._skills_payload(selected_skills),
             },
         )

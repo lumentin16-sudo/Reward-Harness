@@ -1,10 +1,10 @@
 {
-  "schema_version": 1,
-  "benchmark": "rewardbench",
-  "dataset_id": "allenai/reward-bench",
-  "split": "filtered",
-  "num_cases": 2985,
-  "content_sha256": "4164e69608547fdeb81a42e9b2bf2c1f40b1d05045153f6b118f15097be575a1",
-  "source_fingerprint": "7de29d19bb4bee7e",
-  "generated_at": "2026-08-16T08:30:09.328303+00:00"
+    "schema_version":  2,
+    "benchmark":  "rewardbench",
+    "dataset_id":  "allenai/reward-bench",
+    "split":  "filtered",
+    "num_cases":  2985,
+    "content_sha256":  "644e14c1d1ef202560cca41738e60d0eaef67cbe495752c92395618dcb3f8e50",
+    "source_fingerprint":  "7de29d19bb4bee7e",
+    "generated_at":  "2026-08-18T15:35:04.1135780+00:00"
 }

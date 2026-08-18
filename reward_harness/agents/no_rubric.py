@@ -5,13 +5,12 @@ from __future__ import annotations
 import json
 
 from ..reward_system import (
-    Candidate,
+    Response,
     RewardResult,
     RewardSystem,
-    RewardTask,
+    Query,
     RubricSet,
     SkillRegistry,
-    TraceEvent,
     _extract_json_object,
 )
 
@@ -25,7 +24,7 @@ position, and must not guess them.
 [Public Task]
 {task_json}
 
-[Candidate]
+[Response]
 {candidate_json}
 
 Evaluation protocol:
@@ -66,29 +65,22 @@ class NoRubricHarness(RewardSystem):
     max_rubrics = 0
     judge_prompt_template = DIRECT_SCORE_PROMPT
 
-    def get_skill_registry(self, task: RewardTask) -> SkillRegistry:
+    def get_skill_registry(self, task: Query) -> SkillRegistry:
         return SkillRegistry()
 
-    def build_rubrics(self, task: RewardTask) -> RubricSet:
+    def build_rubrics(self, task: Query) -> RubricSet:
         """保留统一接口，但不调用 Rubric Model。"""
 
         return RubricSet(
-            task_id=task.task_id,
+            query_id=task.query_id,
             rubrics=(),
-            trace=(
-                TraceEvent(
-                    component="G",
-                    name="rubric_generation_skipped",
-                    payload={"baseline": "no_rubric"},
-                ),
-            ),
             metadata={"baseline": "no_rubric"},
         )
 
     def score(
         self,
-        task: RewardTask,
-        candidate: Candidate,
+        task: Query,
+        candidate: Response,
         rubrics: RubricSet,
     ) -> RewardResult:
         task_payload = self._task_payload(task)
@@ -109,25 +101,12 @@ class NoRubricHarness(RewardSystem):
             raise ValueError("direct judge reason must be a string when provided")
 
         return RewardResult(
-            task_id=task.task_id,
-            candidate_id=candidate.candidate_id,
+            query_id=task.query_id,
+            response_id=candidate.response_id,
             reward=reward,
             judgments=(),
-            trace=(
-                TraceEvent(
-                    component="J",
-                    name="candidate_directly_scored",
-                    payload={"reward": reward},
-                ),
-                TraceEvent(
-                    component="A",
-                    name="direct_scalar_used",
-                    payload={"reward": reward},
-                ),
-            ),
             metadata={
                 "aggregation": "direct_scalar",
                 "reason": reason or "",
-                "raw_judge_response": raw_response,
             },
         )

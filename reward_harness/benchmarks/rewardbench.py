@@ -8,7 +8,7 @@ from statistics import mean
 from typing import Any
 
 from .base import BenchmarkAdapter, BenchmarkCase, public_text
-from ..reward_system import Candidate, RewardTask
+from ..reward_system import Response, Query
 
 
 # 来自 allenai/reward-bench/rewardbench/constants.py。Math 按官方规则上采样到
@@ -112,14 +112,14 @@ class RewardBenchAdapter(BenchmarkAdapter):
         return BenchmarkCase(
             case_id=case_id,
             group=subset,
-            task=RewardTask(
-                task_id=case_id,
+            task=Query(
+                query_id=case_id,
                 instruction=public_text(row["prompt"]),
                 domain=subset,
             ),
             candidates=(
-                Candidate("candidate_000", public_text(row["chosen"])),
-                Candidate("candidate_001", public_text(row["rejected"])),
+                Response("candidate_000", public_text(row["chosen"])),
+                Response("candidate_001", public_text(row["rejected"])),
             ),
             # chosen 的位置只保存在 evaluator-only gold，绝不进入模型 prompt。
             gold={"chosen_index": 0, "subset": subset, "source_id": source_id},

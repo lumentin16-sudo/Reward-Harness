@@ -217,7 +217,7 @@ def evaluate_case(
             if outcome["error"] is None:
                 outcome["error"] = {
                     "stage": "score",
-                    "candidate_id": candidate.candidate_id,
+                    "response_id": candidate.response_id,
                     "message": error,
                 }
         else:
@@ -418,6 +418,14 @@ def run_configuration(
                         "usage": {"input_tokens": 0, "output_tokens": 0, "latency_ms": 0.0},
                         "error": {"stage": "evaluator", "message": f"{type(exc).__name__}: {exc}"},
                     })
+                # 每行就是一条可独立交给 Harness Optimizer 的完整轨迹。
+                row = {
+                    "trajectory_schema_version": 1,
+                    "benchmark": adapter.name,
+                    "harness": harness.name,
+                    "run_signature": run_signature,
+                    **row,
+                }
                 stream.write(json.dumps(row, ensure_ascii=False) + "\n")
                 existing.append(row)
                 status = "ERROR" if row.get("error") else "OK"

@@ -8,7 +8,7 @@ from statistics import mean
 from typing import Any
 
 from .base import BenchmarkAdapter, BenchmarkCase, public_text
-from ..reward_system import Candidate, RewardTask
+from ..reward_system import Response, Query
 
 
 class RMBenchAdapter(BenchmarkAdapter):
@@ -37,9 +37,9 @@ class RMBenchAdapter(BenchmarkAdapter):
         return BenchmarkCase(
             case_id=case_id,
             group=domain,
-            task=RewardTask(task_id=case_id, instruction=public_text(row["prompt"]), domain=domain),
+            task=Query(query_id=case_id, instruction=public_text(row["prompt"]), domain=domain),
             candidates=tuple(
-                Candidate(candidate_id=f"candidate_{i:03d}", content=public_text(text))
+                Response(response_id=f"candidate_{i:03d}", content=public_text(text))
                 for i, text in enumerate(chosen + rejected)
             ),
             gold={"raw_domain": domain, "chosen_count": len(chosen), "source_id": source_id},

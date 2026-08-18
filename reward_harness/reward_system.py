@@ -5,12 +5,12 @@
 1. 定义任务、候选回答、Rubric、Skill 和评分结果的数据结构；
 2. 限制 Rubric 生成阶段（G）和 Judge 阶段（J）各自可见的信息；
 3. 将内部对象转换成稳定的 Prompt payload，并解析模型返回的 JSON；
-4. 校验候选输出，固定奖励聚合与 A/B 比较流程；
-5. 保存模型调用和 G/J/A 执行轨迹，供复现与错误分析使用。
+4. 校验候选输出和最终奖励，并提供统一的 A/B 比较流程；
+5. 保持业务结果可序列化，完整执行轨迹由 benchmark runner 统一记录。
 
 候选 Harness 的搜索边界只有三个公开接口：
 ``get_skill_registry``、``build_rubrics`` 和 ``score``。候选可以自由设计
-Skill、Prompt 和 G/J 调用流程，但不能修改 payload、解析、聚合与比较协议。
+Skill、Prompt、G/J 调用流程和奖励聚合策略，但不能修改 payload 与比较协议。
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, ClassVar, Literal, Mapping, Protocol, Sequence, final
+from typing import Any, ClassVar, Mapping, Protocol, Sequence, final
 
 
 # ---------------------------------------------------------------------------
@@ -38,8 +38,6 @@ JSONValue = (
     | list["JSONValue"]
     | dict[str, "JSONValue"]
 )
-Component = Literal["G", "J", "A"]
-ModelRole = Literal["rubric", "judge"]
 
 
 class LLMCallable(Protocol):
@@ -123,82 +121,45 @@ def _extract_json_object(text: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
-class RewardTask:
+class Query:
     """公开任务信息。
 
     Rubric Model 在 G 阶段只能看到该对象，不能看到候选回答或真实偏好。
     """
 
-    task_id: str  # benchmark 内稳定且唯一的任务标识
+    query_id: str  # benchmark 内稳定且唯一的任务标识
     instruction: str  # 用户要求或待完成的任务正文
     context: str | None = None  # 允许公开给评价器的补充上下文
     domain: str | None = None  # 可选领域标签，例如 math / coding
     metadata: Mapping[str, JSONValue] = field(default_factory=dict)  # 公开扩展字段
 
     def __post_init__(self) -> None:
-        _require_non_empty(self.task_id, "task_id")
+        _require_non_empty(self.query_id, "query_id")
         _require_non_empty(self.instruction, "instruction")
         _json_safe(dict(self.metadata), "metadata")
 
 
 @dataclass(frozen=True, slots=True)
-class Candidate:
+class Response:
     """单个待评分回答或可审计的 Agent 轨迹。
 
-    ``candidate_id`` 只用于结果绑定，不会通过固定 payload 暴露给 Judge，
+    ``response_id`` 只用于结果绑定，不会通过固定 payload 暴露给 Judge，
     从而避免模型根据 ``a`` / ``b`` 等位置标识产生偏差。
     """
 
-    candidate_id: str  # evaluator 用于绑定预测结果，不属于 Judge 输入
+    response_id: str  # evaluator 用于绑定预测结果，不属于 Judge 输入
     content: str  # 当前 Judge 唯一可见的候选正文
     metadata: Mapping[str, JSONValue] = field(default_factory=dict)  # evaluator 侧信息
 
     def __post_init__(self) -> None:
-        _require_non_empty(self.candidate_id, "candidate_id")
+        _require_non_empty(self.response_id, "response_id")
         _require_non_empty(self.content, "content")
         _json_safe(dict(self.metadata), "metadata")
 
 
 # ---------------------------------------------------------------------------
-# 审计记录与 Rubric 数据结构
+# Rubric 数据结构
 # ---------------------------------------------------------------------------
-
-@dataclass(frozen=True, slots=True)
-class TraceEvent:
-    """可归因到 G（生成）、J（评分）或 A（聚合）的结构化审计事件。"""
-
-    component: Component  # 事件来自 G、J 或 A 中的哪一阶段
-    name: str  # 稳定事件名，例如 rubrics_generated
-    payload: Mapping[str, JSONValue] = field(default_factory=dict)  # 事件详情
-
-    def __post_init__(self) -> None:
-        if self.component not in {"G", "J", "A"}:
-            raise ValueError(f"unknown trace component: {self.component!r}")
-        _require_non_empty(self.name, "trace event name")
-        _json_safe(dict(self.payload), "trace payload")
-
-
-@dataclass(frozen=True, slots=True)
-class ModelCallRecord:
-    """冻结模型包装器记录的一次完整模型调用。"""
-
-    call_id: str  # 单次实验内唯一的调用 ID
-    role: ModelRole  # 调用属于 rubric model 还是 judge model
-    prompt: str  # 实际送入模型的完整输入
-    response: str  # 未解析的模型原始输出
-    input_tokens: int  # 输入 token 成本
-    output_tokens: int  # 输出 token 成本
-    latency_ms: float  # 端到端调用耗时
-
-    def __post_init__(self) -> None:
-        _require_non_empty(self.call_id, "call_id")
-        if self.role not in {"rubric", "judge"}:
-            raise ValueError(f"unknown model role: {self.role!r}")
-        if self.input_tokens < 0 or self.output_tokens < 0:
-            raise ValueError("token counts must be non-negative")
-        _require_finite(self.latency_ms, "latency_ms")
-        if self.latency_ms < 0:
-            raise ValueError("latency_ms must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,7 +168,7 @@ class Rubric:
 
     rubric_id: str  # RubricSet 内唯一，供 Judgment 精确引用
     criterion: str  # 应检查的单一、可观察属性
-    weight: float = 1.0  # 固定聚合器使用的相对权重
+    weight: float = 1.0  # 供具体 Harness 聚合逻辑使用的相对权重
     hard_constraint: bool = False  # 为未来硬约束聚合策略保留的显式标记
     metadata: Mapping[str, JSONValue] = field(default_factory=dict)
 
@@ -228,21 +189,15 @@ class RubricSet:
     防止候选 A 和 B 因评价标准不同而失去可比性。
     """
 
-    task_id: str  # Rubric 所属任务
+    query_id: str  # Rubric 所属任务
     rubrics: tuple[Rubric, ...]  # 不可变集合，评分阶段不能原地修改
-    trace: tuple[TraceEvent, ...] = ()  # 这里只保存 G 阶段事件
-    model_calls: tuple[ModelCallRecord, ...] = ()  # 这里只保存 rubric 模型调用
     metadata: Mapping[str, JSONValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _require_non_empty(self.task_id, "task_id")
+        _require_non_empty(self.query_id, "query_id")
         ids = [rubric.rubric_id for rubric in self.rubrics]
         if len(ids) != len(set(ids)):
             raise ValueError("rubric ids must be unique within a RubricSet")
-        if any(event.component != "G" for event in self.trace):
-            raise ValueError("RubricSet.trace may contain only G events")
-        if any(call.role != "rubric" for call in self.model_calls):
-            raise ValueError("RubricSet.model_calls may contain only rubric calls")
         _json_safe(dict(self.metadata), "metadata")
 
     @property
@@ -253,69 +208,26 @@ class RubricSet:
 
 
 # ---------------------------------------------------------------------------
-# 原子 Skill 协议
+# Workflow Skill 协议
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
-class SkillInput:
-    """单次 Skill 调用的受限上下文。
-
-    G 阶段只能看到公开任务；J 阶段可以额外看到共享 Rubric 和当前单个候选。
-    任何阶段都看不到另一个候选或 benchmark 的真实偏好标签。
-    """
-
-    component: Literal["G", "J"]
-    task: RewardTask
-    rubrics: RubricSet | None = None
-    candidate: Candidate | None = None
-
-    def __post_init__(self) -> None:
-        # 在数据结构层强制执行信息隔离，而不是只依赖 Prompt 约定。
-        if self.component == "G":
-            if self.rubrics is not None or self.candidate is not None:
-                raise ValueError("G-stage skills may see only the task")
-        elif self.component == "J":
-            if self.rubrics is None or self.candidate is None:
-                raise ValueError("J-stage skills require rubrics and one candidate")
-        else:
-            raise ValueError(f"unknown skill component: {self.component!r}")
-
-
-@dataclass(frozen=True, slots=True)
-class SkillResult:
-    """一个原子 Skill 返回、随后可注入模型 Prompt 的辅助知识。"""
-
-    skill_name: str
-    content: str
-    metadata: Mapping[str, JSONValue] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        _require_non_empty(self.skill_name, "skill_name")
-        _require_non_empty(self.content, "skill result content")
-        _json_safe(dict(self.metadata), "metadata")
-
-
-class Skill(ABC):
-    """候选可自由定义的原子 Skill。
-
-    Skill 不预先绑定 G 或 J；能否在某阶段工作由传入的 ``SkillInput`` 决定。
-    """
+class Skill:
+    """可由模型选择并注入 Prompt 的静态 workflow 指令。"""
 
     name: str
     description: str
+    content: str
 
-    @abstractmethod
-    def invoke(self, context: SkillInput) -> SkillResult:
-        """根据调用阶段提供辅助知识。"""
+    def __post_init__(self) -> None:
+        _require_non_empty(self.name, "skill name")
+        _require_non_empty(self.description, "skill description")
+        _require_non_empty(self.content, "skill content")
 
 
 @dataclass(frozen=True, slots=True)
 class SkillRegistry:
-    """向模型暴露 Skill Catalog，并按名称执行零个或多个 Skill。
-
-    Registry 同时负责检查名称唯一性、未知调用和返回值绑定，避免模型或候选
-    通过拼写错误静默调用到错误 Skill。
-    """
+    """向模型暴露 Skill Catalog，并按名称返回选中的 workflow 指令。"""
 
     skills: tuple[Skill, ...] = ()
 
@@ -324,8 +236,6 @@ class SkillRegistry:
         for skill in self.skills:
             if not isinstance(skill, Skill):
                 raise TypeError("SkillRegistry accepts only Skill instances")
-            _require_non_empty(skill.name, "skill name")
-            _require_non_empty(skill.description, "skill description")
             names.append(skill.name)
         if len(names) != len(set(names)):
             raise ValueError("skill names must be unique within a SkillRegistry")
@@ -345,12 +255,8 @@ class SkillRegistry:
             for skill in self.skills
         )
 
-    def invoke(
-        self,
-        skill_names: tuple[str, ...],
-        context: SkillInput,
-    ) -> tuple[SkillResult, ...]:
-        """按模型给出的顺序执行 Skill，并验证每个结果的来源绑定。"""
+    def select(self, skill_names: tuple[str, ...]) -> tuple[Skill, ...]:
+        """按模型给出的顺序返回 Skill，并拒绝重复或未知名称。"""
 
         if len(skill_names) != len(set(skill_names)):
             raise ValueError("a model may call each skill at most once per stage")
@@ -359,15 +265,7 @@ class SkillRegistry:
         if unknown:
             raise ValueError(f"unknown skill names: {sorted(unknown)}")
 
-        results: list[SkillResult] = []
-        for name in skill_names:
-            result = by_name[name].invoke(context)
-            if not isinstance(result, SkillResult):
-                raise TypeError(f"skill {name!r} must return SkillResult")
-            if result.skill_name != name:
-                raise ValueError(f"skill {name!r} returned a mismatched skill_name")
-            results.append(result)
-        return tuple(results)
+        return tuple(by_name[name] for name in skill_names)
 
 
 # ---------------------------------------------------------------------------
@@ -375,21 +273,20 @@ class SkillRegistry:
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
-class CriterionJudgment:
-    """Judge 对单条 Rubric 给出的离散评分与可审计依据。"""
+class RubricJudgment:
+    """Judge 对单条 Rubric 给出的原始数值评分与可审计依据。"""
 
     rubric_id: str  # 必须引用共享 RubricSet 中存在的 ID
-    score: int  # 固定为 0..5 的整数
+    score: float  # 原始评分尺度由具体 Harness 定义
     evidence: tuple[str, ...] = ()  # 候选正文中的支持或反驳证据
     confidence: float | None = None  # 可选的 0..1 置信度，仅用于审计
     metadata: Mapping[str, JSONValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _require_non_empty(self.rubric_id, "rubric_id")
-        if isinstance(self.score, bool) or not isinstance(self.score, int):
-            raise ValueError("criterion score must be an integer")
-        if not 0 <= self.score <= 5:
-            raise ValueError("criterion score must be in [0, 5]")
+        if isinstance(self.score, bool) or not isinstance(self.score, (int, float)):
+            raise ValueError("criterion score must be numeric")
+        _require_finite(self.score, "criterion score")
         if self.confidence is not None:
             _require_finite(self.confidence, "confidence")
             if not 0 <= self.confidence <= 1:
@@ -399,26 +296,20 @@ class CriterionJudgment:
 
 @dataclass(frozen=True, slots=True)
 class RewardResult:
-    """单个候选的逐项评分、归一化奖励和 J/A 审计信息。"""
+    """单个候选的逐项评分、归一化奖励和 Harness 元数据。"""
 
-    task_id: str  # 防止结果被绑定到其他任务
-    candidate_id: str  # 防止结果被绑定到另一个候选
+    query_id: str  # 防止结果被绑定到其他任务
+    response_id: str  # 防止结果被绑定到另一个候选
     reward: float  # 最终标量奖励，范围固定为 [0, 1]
-    judgments: tuple[CriterionJudgment, ...] = ()
-    trace: tuple[TraceEvent, ...] = ()  # 只保存 J/A 事件，G 事件属于 RubricSet
-    model_calls: tuple[ModelCallRecord, ...] = ()  # 只保存 judge 模型调用
+    judgments: tuple[RubricJudgment, ...] = ()
     metadata: Mapping[str, JSONValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _require_non_empty(self.task_id, "task_id")
-        _require_non_empty(self.candidate_id, "candidate_id")
+        _require_non_empty(self.query_id, "query_id")
+        _require_non_empty(self.response_id, "response_id")
         _require_finite(self.reward, "reward")
         if not 0 <= self.reward <= 1:
             raise ValueError("reward must be in [0, 1]")
-        if any(event.component == "G" for event in self.trace):
-            raise ValueError("RewardResult.trace must not duplicate G events")
-        if any(call.role == "rubric" for call in self.model_calls):
-            raise ValueError("RewardResult.model_calls must not contain rubric calls")
         _json_safe(dict(self.metadata), "metadata")
 
 
@@ -434,57 +325,25 @@ class Preference(str, Enum):
 class EvaluationResult:
     """一条任务在共享 Rubric 下的完整多候选评分结果。"""
 
-    task_id: str
+    query_id: str
     rubric_set: RubricSet
     results: tuple[RewardResult, ...]
-
-    @property
-    def model_calls(self) -> tuple[ModelCallRecord, ...]:
-        """按 Rubric 生成、候选评分的执行顺序合并全部模型调用。"""
-
-        return self.rubric_set.model_calls + tuple(
-            call for result in self.results for call in result.model_calls
-        )
-
-    @property
-    def trace(self) -> tuple[TraceEvent, ...]:
-        """按 Rubric 生成、候选评分的执行顺序合并全部审计事件。"""
-
-        return self.rubric_set.trace + tuple(
-            event for result in self.results for event in result.trace
-        )
 
 
 @dataclass(frozen=True, slots=True)
 class ComparisonResult:
     """共享 Rubric 下的一次完整 A/B 比较结果。"""
 
-    task_id: str
+    query_id: str
     rubric_set: RubricSet
     result_a: RewardResult
     result_b: RewardResult
     preference: Preference
     reward_margin: float
 
-    @property
-    def model_calls(self) -> tuple[ModelCallRecord, ...]:
-        """按 G → Judge A → Judge B 的顺序合并全部模型调用。"""
-
-        return (
-            self.rubric_set.model_calls
-            + self.result_a.model_calls
-            + self.result_b.model_calls
-        )
-
-    @property
-    def trace(self) -> tuple[TraceEvent, ...]:
-        """按 G → Judge A → Judge B 的顺序合并全部审计事件。"""
-
-        return self.rubric_set.trace + self.result_a.trace + self.result_b.trace
-
 
 # ---------------------------------------------------------------------------
-# Reward Harness 稳定接口与固定控制流程
+# Reward Harness 稳定接口与公共控制流程
 # ---------------------------------------------------------------------------
 
 class RewardSystem(ABC):
@@ -497,8 +356,11 @@ class RewardSystem(ABC):
 
     固定部分：
         - 输入 payload 与 JSON 输出协议；
-        - 分数范围、Rubric 覆盖和结果绑定校验；
-        - 加权平均聚合、共享 Rubric 的 A/B 比较和 tie 判定。
+        - Rubric 覆盖、结果绑定和最终 reward 范围校验；
+        - 共享 Rubric 的 A/B 比较和 tie 判定。
+
+    原始 Judge 分数尺度和聚合方式属于 Harness 的 ``score`` 实现；所有 Harness
+    只需把最终 ``RewardResult.reward`` 归一化到 [0, 1]。
     """
 
     min_rubrics: ClassVar[int] = 2
@@ -512,11 +374,10 @@ class RewardSystem(ABC):
         fixed_methods = {
             "evaluate",
             "compare",
-            "aggregate",
             "_task_payload",
             "_candidate_payload",
             "_rubrics_payload",
-            "_skill_results_payload",
+            "_skills_payload",
             "_parse_skill_calls",
             "_parse_rubrics",
             "_parse_judgments",
@@ -555,25 +416,25 @@ class RewardSystem(ABC):
         return self._judge_llm
 
     @abstractmethod
-    def get_skill_registry(self, task: RewardTask) -> SkillRegistry:
-        """候选接口 1：返回原子 Skill；不使用 Skill 时返回空 Registry。"""
+    def get_skill_registry(self, task: Query) -> SkillRegistry:
+        """候选接口 1：返回 workflow Skill；不使用 Skill 时返回空 Registry。"""
 
     @abstractmethod
-    def build_rubrics(self, task: RewardTask) -> RubricSet:
+    def build_rubrics(self, task: Query) -> RubricSet:
         """候选接口 2：只根据公开任务生成共享 Rubric。"""
 
     @abstractmethod
     def score(
         self,
-        task: RewardTask,
-        candidate: Candidate,
+        task: Query,
+        candidate: Response,
         rubrics: RubricSet,
     ) -> RewardResult:
         """候选接口 3：根据共享 Rubric 为当前单个候选评分。"""
 
     @staticmethod
     @final
-    def _task_payload(task: RewardTask) -> dict[str, JSONValue]:
+    def _task_payload(task: Query) -> dict[str, JSONValue]:
         """将公开任务转换为所有候选共用的 Prompt payload。
 
         这里保留任务 metadata，因为它属于 benchmark 明确提供的公开任务信息；
@@ -581,7 +442,7 @@ class RewardSystem(ABC):
         """
 
         return {
-            "task_id": task.task_id,
+            "query_id": task.query_id,
             "instruction": task.instruction,
             "context": task.context,
             "domain": task.domain,
@@ -590,7 +451,7 @@ class RewardSystem(ABC):
 
     @staticmethod
     @final
-    def _candidate_payload(candidate: Candidate) -> dict[str, JSONValue]:
+    def _candidate_payload(candidate: Response) -> dict[str, JSONValue]:
         """只暴露当前回答内容，避免候选 ID 或 evaluator metadata 泄露。"""
 
         return {"content": candidate.content}
@@ -600,8 +461,8 @@ class RewardSystem(ABC):
     def _rubrics_payload(rubrics: RubricSet) -> list[dict[str, JSONValue]]:
         """将共享 Rubric 转换为 Judge 可见的稳定 payload。
 
-        Judge 只需要知道“评什么”，不需要看到 G 阶段日志、模型响应和其他
-        evaluator metadata。聚合权重由固定聚合器读取，无需注入 Judge Prompt。
+        Judge 只需要知道“评什么”，不需要看到 G 阶段日志、模型响应、聚合权重
+        和其他 evaluator metadata。Rubric 权重由具体 Harness 的聚合逻辑读取。
         """
 
         return [
@@ -614,47 +475,21 @@ class RewardSystem(ABC):
 
     @staticmethod
     @final
-    def _skill_results_payload(
-        results: tuple[SkillResult, ...],
+    def _skills_payload(
+        skills: tuple[Skill, ...],
     ) -> list[dict[str, JSONValue]]:
-        """将已执行 Skill 的结果转换为稳定 Prompt payload。
+        """将选中的 workflow Skill 转换为稳定 Prompt payload。
 
-        该转换保留 Skill 名称，便于模型区分多个来源，也便于审计最终使用了
-        哪些辅助知识。
+        description 只用于选择阶段；选中后只向工作 Prompt 注入名称和内容。
         """
 
         return [
             {
-                "name": result.skill_name,
-                "content": result.content,
-                "metadata": dict(result.metadata),
+                "name": skill.name,
+                "content": skill.content,
             }
-            for result in results
+            for skill in skills
         ]
-
-    @final
-    def aggregate(
-        self,
-        judgments: tuple[CriterionJudgment, ...],
-        rubrics: RubricSet,
-    ) -> float:
-        """按 Rubric.weight 加权平均，并将 0..5 分数归一化到 [0, 1]。
-
-        聚合规则固定在基类中，避免候选通过修改标量映射而非改进评价能力来
-        获得更高 benchmark 分数。
-        """
-
-        if not judgments:
-            raise ValueError("cannot aggregate an empty judgment set")
-
-        # _parse_judgments / _validate_reward_result 已保证每条 Rubric 恰有一项评分。
-        judgment_by_id = {judgment.rubric_id: judgment for judgment in judgments}
-        total_weight = sum(rubric.weight for rubric in rubrics.rubrics)
-        weighted_score = sum(
-            rubric.weight * judgment_by_id[rubric.rubric_id].score
-            for rubric in rubrics.rubrics
-        )
-        return weighted_score / (5.0 * total_weight)
 
     @staticmethod
     @final
@@ -719,7 +554,7 @@ class RewardSystem(ABC):
     def _parse_judgments(
         raw_response: str,
         rubrics: RubricSet,
-    ) -> tuple[CriterionJudgment, ...]:
+    ) -> tuple[RubricJudgment, ...]:
         """解析固定 Judge JSON 协议并检查 Rubric 覆盖完整性。
 
         Judge 必须对共享 RubricSet 中每条 Rubric 恰好评分一次：遗漏、重复或
@@ -731,7 +566,7 @@ class RewardSystem(ABC):
         if not isinstance(raw_judgments, list):
             raise ValueError("judge response must contain a judgments list")
 
-        parsed: dict[str, CriterionJudgment] = {}
+        parsed: dict[str, RubricJudgment] = {}
         for index, raw in enumerate(raw_judgments):
             if not isinstance(raw, dict):
                 raise ValueError(f"judgment at index {index} must be an object")
@@ -739,14 +574,8 @@ class RewardSystem(ABC):
             if rubric_id in parsed:
                 raise ValueError(f"duplicate judgment for rubric {rubric_id!r}")
             score = raw.get("score")
-            if (
-                isinstance(score, bool)
-                or not isinstance(score, int)
-                or not 0 <= score <= 5
-            ):
-                raise ValueError(
-                    f"score for rubric {rubric_id!r} must be an integer from 0 to 5"
-                )
+            if isinstance(score, bool) or not isinstance(score, (int, float)):
+                raise ValueError(f"score for rubric {rubric_id!r} must be numeric")
 
             # 为兼容模型偶尔返回单个字符串，内部统一转换成 tuple[str, ...]。
             evidence_raw = raw.get("evidence", [])
@@ -757,10 +586,10 @@ class RewardSystem(ABC):
             else:
                 raise ValueError(f"evidence for rubric {rubric_id!r} must be a list")
 
-            # confidence 是可选审计信号，不参与当前固定聚合公式。
+            # confidence 是可选审计信号；是否参与聚合由具体 Harness 决定。
             confidence_raw = raw.get("confidence")
             confidence = None if confidence_raw is None else float(confidence_raw)
-            parsed[rubric_id] = CriterionJudgment(
+            parsed[rubric_id] = RubricJudgment(
                 rubric_id=rubric_id,
                 score=score,
                 evidence=evidence,
@@ -781,8 +610,8 @@ class RewardSystem(ABC):
     @final
     def evaluate(
         self,
-        task: RewardTask,
-        candidates: Sequence[Candidate],
+        task: Query,
+        candidates: Sequence[Response],
     ) -> EvaluationResult:
         """生成一次共享 Rubric，并依次为全部候选评分。
 
@@ -794,8 +623,8 @@ class RewardSystem(ABC):
         candidate_tuple = tuple(candidates)
         if not candidate_tuple:
             raise ValueError("evaluate requires at least one candidate")
-        candidate_ids = [candidate.candidate_id for candidate in candidate_tuple]
-        if len(candidate_ids) != len(set(candidate_ids)):
+        response_ids = [candidate.response_id for candidate in candidate_tuple]
+        if len(response_ids) != len(set(response_ids)):
             raise ValueError("candidate ids must be distinct")
 
         # G：每条任务只生成一次，所有候选严格共享同一个 RubricSet 对象。
@@ -809,7 +638,7 @@ class RewardSystem(ABC):
             results.append(result)
 
         return EvaluationResult(
-            task_id=task.task_id,
+            query_id=task.query_id,
             rubric_set=rubrics,
             results=tuple(results),
         )
@@ -817,9 +646,9 @@ class RewardSystem(ABC):
     @final
     def compare(
         self,
-        task: RewardTask,
-        candidate_a: Candidate,
-        candidate_b: Candidate,
+        task: Query,
+        candidate_a: Response,
+        candidate_b: Response,
     ) -> ComparisonResult:
         """执行一次完整、pointwise 且共享 Rubric 的 A/B 比较。
 
@@ -841,7 +670,7 @@ class RewardSystem(ABC):
             preference = Preference.B
 
         return ComparisonResult(
-            task_id=task.task_id,
+            query_id=task.query_id,
             rubric_set=rubrics,
             result_a=result_a,
             result_b=result_b,
@@ -849,11 +678,11 @@ class RewardSystem(ABC):
             reward_margin=margin,
         )
 
-    def _validate_rubric_set(self, task: RewardTask, rubrics: RubricSet) -> None:
+    def _validate_rubric_set(self, task: Query, rubrics: RubricSet) -> None:
         """校验候选生成的 RubricSet 是否属于当前任务且数量合规。"""
 
-        if rubrics.task_id != task.task_id:
-            raise ValueError("RubricSet.task_id does not match the task")
+        if rubrics.query_id != task.query_id:
+            raise ValueError("RubricSet.query_id does not match the task")
         if not self.min_rubrics <= len(rubrics.rubrics) <= self.max_rubrics:
             raise ValueError(
                 f"expected {self.min_rubrics}..{self.max_rubrics} rubrics, "
@@ -862,17 +691,17 @@ class RewardSystem(ABC):
 
     @staticmethod
     def _validate_reward_result(
-        task: RewardTask,
-        candidate: Candidate,
+        task: Query,
+        candidate: Response,
         rubrics: RubricSet,
         result: RewardResult,
     ) -> None:
         """校验单候选结果的绑定关系和 Rubric 覆盖完整性。"""
 
-        if result.task_id != task.task_id:
-            raise ValueError("RewardResult.task_id does not match the task")
-        if result.candidate_id != candidate.candidate_id:
-            raise ValueError("RewardResult.candidate_id does not match the candidate")
+        if result.query_id != task.query_id:
+            raise ValueError("RewardResult.query_id does not match the task")
+        if result.response_id != candidate.response_id:
+            raise ValueError("RewardResult.response_id does not match the candidate")
 
         judged_ids = [judgment.rubric_id for judgment in result.judgments]
         if len(judged_ids) != len(set(judged_ids)):

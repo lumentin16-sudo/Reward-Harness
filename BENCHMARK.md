@@ -106,8 +106,9 @@ results/reward_agent/{benchmark}/{agent}/{model}_{signature}/
 └── summary.json
 ```
 
-- `trajectories.jsonl`：逐题增量审计记录，包含 Task、Candidates、evaluator-only gold、
-  Rubrics、Judgments、Reward、G/J/A trace、模型原始请求响应、token、延迟及错误。
+- `trajectories.jsonl`：唯一的完整轨迹文件。每行独立包含 Query、Responses、
+  evaluator-only gold、Harness metadata、Rubrics、Judgments、Reward、完整模型请求响应、
+  token、延迟、错误及 benchmark 单题结果，可直接作为 Harness Optimization 输入。
 - `summary.json`：数据集指标、错误数量、token/延迟汇总、运行签名和轨迹文件路径。
 - `config.json`：脱敏模型配置、agent 文件及 SHA-256、数据目录和结果路径。
 

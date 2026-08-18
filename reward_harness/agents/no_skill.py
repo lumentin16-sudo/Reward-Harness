@@ -5,19 +5,19 @@ from __future__ import annotations
 import json
 
 from ..reward_system import (
-    Candidate,
+    Response,
+    RubricJudgment,
     RewardResult,
     RewardSystem,
-    RewardTask,
+    Query,
     RubricSet,
     SkillRegistry,
-    TraceEvent,
 )
 
 
 RUBRIC_GENERATION_PROMPT = """You are an expert evaluation-rubric designer.
 
-Generate task-specific evaluation rubrics using only the public task. Candidate
+Generate task-specific evaluation rubrics using only the public task. Response
 answers and preference labels are intentionally unavailable; do not infer them.
 
 [Public Task]
@@ -60,7 +60,7 @@ labels.
 [Shared Rubrics]
 {rubrics_json}
 
-[Candidate]
+[Response]
 {candidate_json}
 
 Requirements:
@@ -93,10 +93,31 @@ class NoSkillHarness(RewardSystem):
     rubric_prompt_template = RUBRIC_GENERATION_PROMPT
     judge_prompt_template = RUBRIC_EVALUATION_PROMPT
 
-    def get_skill_registry(self, task: RewardTask) -> SkillRegistry:
+    def get_skill_registry(self, task: Query) -> SkillRegistry:
         return SkillRegistry()
 
-    def build_rubrics(self, task: RewardTask) -> RubricSet:
+    @staticmethod
+    def aggregate(
+        judgments: tuple[RubricJudgment, ...],
+        rubrics: RubricSet,
+    ) -> float:
+        """按本 Harness 的 0～5 评分协议执行加权平均并归一化。"""
+
+        if not judgments:
+            raise ValueError("cannot aggregate an empty judgment set")
+        for judgment in judgments:
+            if not isinstance(judgment.score, int) or not 0 <= judgment.score <= 5:
+                raise ValueError("no_skill expects integer scores in [0, 5]")
+
+        judgment_by_id = {judgment.rubric_id: judgment for judgment in judgments}
+        total_weight = sum(rubric.weight for rubric in rubrics.rubrics)
+        weighted_score = sum(
+            rubric.weight * judgment_by_id[rubric.rubric_id].score
+            for rubric in rubrics.rubrics
+        )
+        return weighted_score / (5.0 * total_weight)
+
+    def build_rubrics(self, task: Query) -> RubricSet:
         task_payload = self._task_payload(task)
         prompt = self.rubric_prompt_template.format(
             task_json=json.dumps(task_payload, ensure_ascii=False, indent=2)
@@ -105,25 +126,15 @@ class NoSkillHarness(RewardSystem):
         rubrics = self._parse_rubrics(raw_response)
 
         return RubricSet(
-            task_id=task.task_id,
+            query_id=task.query_id,
             rubrics=rubrics,
-            trace=(
-                TraceEvent(
-                    component="G",
-                    name="rubrics_generated",
-                    payload={"rubric_count": len(rubrics)},
-                ),
-            ),
-            metadata={
-                "selected_skills": [],
-                "raw_rubric_response": raw_response,
-            },
+            metadata={"selected_skills": []},
         )
 
     def score(
         self,
-        task: RewardTask,
-        candidate: Candidate,
+        task: Query,
+        candidate: Response,
         rubrics: RubricSet,
     ) -> RewardResult:
         task_payload = self._task_payload(task)
@@ -139,25 +150,12 @@ class NoSkillHarness(RewardSystem):
         reward = self.aggregate(judgments, rubrics)
 
         return RewardResult(
-            task_id=task.task_id,
-            candidate_id=candidate.candidate_id,
+            query_id=task.query_id,
+            response_id=candidate.response_id,
             reward=reward,
             judgments=judgments,
-            trace=(
-                TraceEvent(
-                    component="J",
-                    name="candidate_scored",
-                    payload={"judgment_count": len(judgments)},
-                ),
-                TraceEvent(
-                    component="A",
-                    name="weighted_mean_aggregated",
-                    payload={"reward": reward},
-                ),
-            ),
             metadata={
                 "aggregation": "weighted_mean",
                 "selected_skills": [],
-                "raw_judge_response": raw_response,
             },
         )

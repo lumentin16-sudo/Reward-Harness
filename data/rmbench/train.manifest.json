@@ -1,10 +1,10 @@
 {
-  "schema_version": 1,
-  "benchmark": "rmbench",
-  "dataset_id": "THU-KEG/RM-Bench",
-  "split": "train",
-  "num_cases": 1327,
-  "content_sha256": "150b170abf83c86f4d3eb064b98b799430a2bd2ce7c127818ed4427e87b13afa",
-  "source_fingerprint": "7d0aa470cea8322b",
-  "generated_at": "2026-08-16T08:17:18.745057+00:00"
+    "schema_version":  2,
+    "benchmark":  "rmbench",
+    "dataset_id":  "THU-KEG/RM-Bench",
+    "split":  "train",
+    "num_cases":  1327,
+    "content_sha256":  "a4c6d1e422ab630bd898300a4009caa5d0ae059757c741ee04dec53edf251682",
+    "source_fingerprint":  "7d0aa470cea8322b",
+    "generated_at":  "2026-08-18T15:35:05.2363526+00:00"
 }

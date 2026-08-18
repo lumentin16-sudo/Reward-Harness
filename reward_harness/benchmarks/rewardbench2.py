@@ -9,7 +9,7 @@ from statistics import mean
 from typing import Any
 
 from .base import BenchmarkAdapter, BenchmarkCase, public_text
-from ..reward_system import Candidate, RewardTask
+from ..reward_system import Response, Query
 
 
 class RewardBench2Adapter(BenchmarkAdapter):
@@ -56,16 +56,16 @@ class RewardBench2Adapter(BenchmarkAdapter):
         return BenchmarkCase(
             case_id=f"rewardbench2:{row_id}",
             group=subset,
-            task=RewardTask(
-                task_id=f"rewardbench2:{row_id}",
+            task=Query(
+                query_id=f"rewardbench2:{row_id}",
                 instruction=public_text(row["prompt"]),
                 domain=subset,
             ),
             candidates=tuple(
-                Candidate(candidate_id=f"candidate_{index:03d}", content=public_text(text))
+                Response(response_id=f"candidate_{index:03d}", content=public_text(text))
                 for index, text in enumerate(completions)
             ),
-            # 这些字段只供 evaluator 使用，永远不进入 RewardTask/Candidate。
+            # 这些字段只供 evaluator 使用，永远不进入 Query/Response。
             gold={"num_correct": int(row["num_correct"]), "subset": subset, "source_id": row_id},
         )
 

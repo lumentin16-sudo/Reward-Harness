@@ -184,7 +184,7 @@ bash run_rmbench_vllm.sh
 
 ### `init_skill`
 
-在生成 Rubric 前动态选择并执行内置 Skill，包括任务目标、约束和 pointwise evidence 等分析。它通常会产生更多模型调用，因此耗时和 token 用量高于 `no_skill`。
+在生成 Rubric 和评分前动态选择 workflow Skill，并把对应提示内容注入模型 Prompt，包括任务目标、约束和 pointwise evidence 等指导。Skill 本身不执行工具调用；额外成本来自 Skill 选择所需的模型请求，因此耗时和 token 用量高于 `no_skill`。
 
 ## RewardSystem 接口
 
@@ -192,20 +192,22 @@ bash run_rmbench_vllm.sh
 
 ```python
 class MyHarness(RewardSystem):
-    def get_skill_registry(self, task: RewardTask) -> SkillRegistry:
+    def get_skill_registry(self, task: Query) -> SkillRegistry:
         ...
 
-    def build_rubrics(self, task: RewardTask) -> RubricSet:
+    def build_rubrics(self, task: Query) -> RubricSet:
         ...
 
     def score(
         self,
-        task: RewardTask,
-        candidate: Candidate,
+        task: Query,
+        candidate: Response,
         rubrics: RubricSet,
     ) -> RewardResult:
         ...
 ```
+
+`RewardSystem` 不规定 Judge 原始分数的尺度或聚合公式。Harness 在 `score()` 中自行解析 Judgment、执行聚合并生成 `RewardResult`；例如可以使用 0～5 加权平均、0～10 平均、最低项或硬约束策略。公共协议只要求每条 Rubric 恰好有一项 Judgment，并且最终 `RewardResult.reward` 归一化到 `[0,1]`。
 
 评测调用方通常只需要调用统一入口：
 
@@ -234,7 +236,7 @@ BenchmarkCase
 └── gold                 # 仅 evaluator 可见的正确答案或标签
 ```
 
-`gold` 不会进入 Reward Task、Candidate 或模型 prompt。新增数据集时，实现 `BenchmarkAdapter` 的以下方法：
+`gold` 不会进入 Query、Response 或模型 prompt。新增数据集时，实现 `BenchmarkAdapter` 的以下方法：
 
 - `load_cases()`：读取标准化数据并执行抽样；
 - `score_outcome()`：计算单条样本的指标贡献；
@@ -249,7 +251,7 @@ Runner 使用两层并发：
 - `--workers`：同时处理多少道 benchmark 题目，默认 4；
 - `--request-workers`：全局最多允许多少个在途 LLM 请求，默认 16。
 
-同一道题完成一次 Rubric 生成后，它的候选评分请求可以并发执行。Rubric、Skill 和 Judge 请求都会经过同一个全局请求上限，因此不会分别无限创建请求。
+同一道题完成一次 Rubric 生成后，它的候选评分请求可以并发执行。Rubric、Skill 选择和 Judge 请求都会经过同一个全局请求上限，因此不会分别无限创建请求。
 
 对四卡 DP=4 的 Qwen3-8B，可以从下面的配置开始调试：
 
@@ -273,7 +275,7 @@ results/reward_agent/{benchmark}/{agent}/{model}_{signature}/
 └── summary.json
 ```
 
-- `trajectories.jsonl`：逐题增量写入 Task、Candidates、evaluator-only gold、Rubrics、Judgments、Reward、模型原始请求响应、token、延迟和错误。
+- `trajectories.jsonl`：唯一的完整轨迹文件。每行独立保存 Query、Responses、evaluator-only gold、Harness metadata、Rubrics、Judgments、Reward、完整模型请求响应、token、延迟、错误和 benchmark 单题结果，可直接作为 Harness Optimization 的输入。
 - `summary.json`：benchmark 指标、错误数、token/延迟统计、运行签名和轨迹文件位置。
 - `config.json`：脱敏后的模型配置、数据配置、Agent 文件及源码 SHA-256。
 

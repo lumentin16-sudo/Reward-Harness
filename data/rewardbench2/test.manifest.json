@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "benchmark": "rewardbench2",
+  "dataset_id": "allenai/reward-bench-2",
+  "split": "test",
+  "num_cases": 1865,
+  "content_sha256": "d068dbac792dfda95026b73a6e4e7d94cb7108c48488d9722d966af6d1195a76",
+  "source_fingerprint": "322d01f095844629",
+  "generated_at": "2026-08-16T08:17:18.096069+00:00"
+}

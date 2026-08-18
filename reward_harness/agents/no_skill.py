@@ -15,26 +15,32 @@ from ..reward_system import (
 )
 
 
-RUBRIC_GENERATION_PROMPT = """You are a rubric-generation model.
+RUBRIC_GENERATION_PROMPT = """You are an expert evaluation-rubric designer.
 
-Generate task-specific evaluation rubrics using only the public task. You must
-not assume anything about candidate answers, because they are intentionally
-unavailable at this stage.
+Generate task-specific evaluation rubrics using only the public task. Candidate
+answers and preference labels are intentionally unavailable; do not infer them.
 
 [Public Task]
 {task_json}
 
 Requirements:
-- Return 2 to 6 non-overlapping rubrics.
-- Each rubric must test one observable property of task success.
-- weight must be a positive number representing the rubric's relative importance.
-- Do not include candidate-specific wording or predicted answers.
+- First infer the task's core intent, explicit constraints, and necessary
+  implicit quality standards.
+- Return 2 to 6 task-specific, non-overlapping rubrics that jointly cover the
+  critical requirements. Avoid generic criteria unless the task requires them.
+- Each rubric must test one distinct property observable from a response.
+- The criterion must include calibrated anchors for scores 0, 1, 3, and 5;
+  scores 2 and 4 represent intermediate quality. Score 3 is an acceptable but
+  imperfect response, while score 5 is genuinely complete and excellent.
+- Give explicit/core requirements more weight than optional qualitative nuance.
+- weight must be between 0.5 and 2.0 and represent relative importance.
+- Do not invent formatting constraints or candidate-specific requirements.
 - Return JSON only, with this schema:
 {{
   "rubrics": [
     {{
       "rubric_id": "short_unique_id",
-      "criterion": "what should be evaluated",
+      "criterion": "distinct observable criterion; Score 0: ...; Score 1: ...; Score 3: ...; Score 5: ...",
       "weight": 1.0
     }}
   ]
@@ -42,10 +48,11 @@ Requirements:
 """
 
 
-RUBRIC_EVALUATION_PROMPT = """You are a pointwise reward judge.
+RUBRIC_EVALUATION_PROMPT = """You are a fair and impartial pointwise reward judge.
 
 Evaluate the single candidate against every supplied rubric. Do not compare it
-with another answer and do not infer its position in a preference pair.
+with another answer, infer its pair position, or assume access to preference
+labels.
 
 [Public Task]
 {task_json}
@@ -58,8 +65,14 @@ with another answer and do not infer its position in a preference pair.
 
 Requirements:
 - Return exactly one judgment for every rubric_id.
+- For each rubric, first identify concrete strengths, errors, or omissions in
+  the candidate, then select the calibrated score defined by that rubric.
 - score must be an integer from 0 to 5.
 - evidence must quote or briefly identify observable candidate content.
+- Prioritize correctness, core intent, and explicit instruction following.
+  Do not reward verbosity, polished style, or repeated claims by themselves.
+- Distinguish major correctness failures from minor presentation defects and
+  keep scores calibrated: 3 is acceptable, 5 is exceptional, and 0 is unusable.
 - Return JSON only, with this schema:
 {{
   "judgments": [

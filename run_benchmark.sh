@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VLLM_BASE_URL="${VLLM_BASE_URL:-http://127.0.0.1:8000/v1}"
+
+# reward_harness.benchmark 参数说明：
+#   --base-url          vLLM 的 OpenAI-compatible API 地址。
+#   --model             vLLM 暴露的模型名称。
+#   --benchmarks        评测数据集，可选 rewardbench、rewardbench2、rmbench。
+#   --agents            指定要评测的 Agent；省略时自动评测 reward_harness/agents/ 下的全部实现。
+#   --agents-dir        自定义 Agent 文件目录。
+#   --workers           同时处理的 benchmark case 数量。
+#   --request-workers   全局同时发送给 vLLM 的最大请求数。
+#   --smoke-per-group   每个分组抽取的题数；0 表示全量评测。
+#   --sample-size       从加载后的全部 case 中随机抽取 N 条；0 表示不额外抽样。
+#   --seed              抽样随机种子。
+#   --stage-retries     Rubric/Judge 阶段失败后的重试次数。
+#   --data-dir          标准化 benchmark 数据目录，默认 data/。
+#   --logs-dir          逐题轨迹和 LLM 缓存目录。
+#   --results-dir       汇总指标目录。
+#   --force             强制重新运行已经完成的相同配置。
+#   --skip-preflight    跳过运行前的 vLLM 健康检查。
+#
+# 续跑默认自动启用，不需要设置 --resume。
+
+python -u -m reward_harness.benchmark \
+  --base-url "$VLLM_BASE_URL" \
+  --model Qwen/Qwen3-8B \
+  --benchmarks rewardbench2 rmbench \
+  --workers 16 \
+  --request-workers 64 \
+  --smoke-per-group 0 \
+  --seed 42 \
+  --logs-dir logs/reward_agent \
+  --results-dir results/reward_agent

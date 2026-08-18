@@ -21,7 +21,7 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, ClassVar, Literal, Mapping, Protocol, final
+from typing import Any, ClassVar, Literal, Mapping, Protocol, Sequence, final
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +431,31 @@ class Preference(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class EvaluationResult:
+    """一条任务在共享 Rubric 下的完整多候选评分结果。"""
+
+    task_id: str
+    rubric_set: RubricSet
+    results: tuple[RewardResult, ...]
+
+    @property
+    def model_calls(self) -> tuple[ModelCallRecord, ...]:
+        """按 Rubric 生成、候选评分的执行顺序合并全部模型调用。"""
+
+        return self.rubric_set.model_calls + tuple(
+            call for result in self.results for call in result.model_calls
+        )
+
+    @property
+    def trace(self) -> tuple[TraceEvent, ...]:
+        """按 Rubric 生成、候选评分的执行顺序合并全部审计事件。"""
+
+        return self.rubric_set.trace + tuple(
+            event for result in self.results for event in result.trace
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ComparisonResult:
     """共享 Rubric 下的一次完整 A/B 比较结果。"""
 
@@ -485,6 +510,7 @@ class RewardSystem(ABC):
         super().__init_subclass__(**kwargs)
         # @final 主要服务静态检查；这里再做运行时检查，防止生成代码绕过约束。
         fixed_methods = {
+            "evaluate",
             "compare",
             "aggregate",
             "_task_payload",
@@ -753,6 +779,42 @@ class RewardSystem(ABC):
         return tuple(parsed[rubric.rubric_id] for rubric in rubrics.rubrics)
 
     @final
+    def evaluate(
+        self,
+        task: RewardTask,
+        candidates: Sequence[Candidate],
+    ) -> EvaluationResult:
+        """生成一次共享 Rubric，并依次为全部候选评分。
+
+        这是面向普通调用方的完整评估入口。底层 ``build_rubrics`` 和
+        ``score`` 仍保持独立，便于 benchmark 使用固定 Rubric、缓存 Rubric，
+        或对单个候选执行精细的并发与失败重试。
+        """
+
+        candidate_tuple = tuple(candidates)
+        if not candidate_tuple:
+            raise ValueError("evaluate requires at least one candidate")
+        candidate_ids = [candidate.candidate_id for candidate in candidate_tuple]
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("candidate ids must be distinct")
+
+        # G：每条任务只生成一次，所有候选严格共享同一个 RubricSet 对象。
+        rubrics = self.build_rubrics(task)
+        RewardSystem._validate_rubric_set(self, task, rubrics)
+
+        results: list[RewardResult] = []
+        for candidate in candidate_tuple:
+            result = self.score(task, candidate, rubrics)
+            RewardSystem._validate_reward_result(task, candidate, rubrics, result)
+            results.append(result)
+
+        return EvaluationResult(
+            task_id=task.task_id,
+            rubric_set=rubrics,
+            results=tuple(results),
+        )
+
+    @final
     def compare(
         self,
         task: RewardTask,
@@ -765,21 +827,9 @@ class RewardSystem(ABC):
         ``score`` 每次只能看到当前候选，不能直接比较 A/B 文本。
         """
 
-        if candidate_a.candidate_id == candidate_b.candidate_id:
-            raise ValueError("candidate ids must be distinct")
-
-        # G：只生成一次，随后 A/B 共用同一 RubricSet 对象。
-        rubrics = self.build_rubrics(task)
-        # 显式调用基类校验器，防止候选覆写同名方法绕过协议。
-        RewardSystem._validate_rubric_set(self, task, rubrics)
-
-        # J：分别进行 pointwise 评分；两个调用都拿到同一个 rubrics 对象。
-        result_a = self.score(task, candidate_a, rubrics)
-        result_b = self.score(task, candidate_b, rubrics)
-
-        # 在使用 reward 之前验证任务、候选和 Rubric 的绑定关系。
-        RewardSystem._validate_reward_result(task, candidate_a, rubrics, result_a)
-        RewardSystem._validate_reward_result(task, candidate_b, rubrics, result_b)
+        evaluation = self.evaluate(task, (candidate_a, candidate_b))
+        rubrics = evaluation.rubric_set
+        result_a, result_b = evaluation.results
 
         # A：tie_tolerance 把足够接近的两个标量奖励映射为平局。
         margin = result_a.reward - result_b.reward

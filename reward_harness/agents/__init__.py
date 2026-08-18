@@ -6,11 +6,13 @@ from .init_skill import (
     PointwiseEvidenceSkill,
     TaskObjectiveSkill,
 )
+from .no_rubric import NoRubricHarness
 from .no_skill import NoSkillHarness
 
 __all__ = [
     "ConstraintAnalysisSkill",
     "InitSkillHarness",
+    "NoRubricHarness",
     "NoSkillHarness",
     "PointwiseEvidenceSkill",
     "TaskObjectiveSkill",

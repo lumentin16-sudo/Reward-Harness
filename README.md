@@ -39,7 +39,7 @@ Reward-Harness/
 └── run_*_vllm.sh                   # 常用运行脚本
 ```
 
-标准化 benchmark 数据位于 `data/` 并随仓库提交；每次运行的轨迹和结果统一写入顶层时间目录，该目录不会提交到 Git。
+标准化 benchmark 数据位于 `data/` 并随仓库提交；每次运行的轨迹和结果统一写入 `results/{run_tag}/`，该目录不会提交到 Git。
 
 ## 环境准备
 
@@ -264,7 +264,7 @@ Runner 使用两层并发：
 每个模型配置的轨迹和汇总结果统一保存在同一目录：
 
 ```text
-{run_tag}/{benchmark}/{agent}/{model}/
+results/{run_tag}/{benchmark}/{harness}/{model}/
 ├── config.json
 ├── trajectories.jsonl
 └── summary.json
@@ -277,7 +277,7 @@ Runner 使用两层并发：
 成功的模型响应还会缓存在：
 
 ```text
-{run_tag}/.llm_cache/
+results/{run_tag}/.llm_cache/
 ```
 
 Runner 在同一个时间 tag 内自动续跑：
@@ -305,7 +305,7 @@ API 请求或 JSON/schema 解析在重试后仍失败时，该 case 会记录 `e
 --base-url         vLLM OpenAI-compatible API 地址
 --model            服务端模型名，默认 Qwen/Qwen3-8B
 --data-dir         标准化 benchmark 数据目录
---output-dir       时间目录的父目录，默认当前目录
+--output-dir       时间目录的父目录，默认 results
 --run-tag          顶层运行目录名，默认 YYYYMMDD_HHMMSS
 --force            清空当前 tag 并重新运行
 --skip-preflight   跳过启动前的 vLLM 单请求检查

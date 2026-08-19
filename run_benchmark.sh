@@ -17,7 +17,7 @@ RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 #   --seed              抽样随机种子。
 #   --stage-retries     Rubric/Judge 阶段失败后的重试次数。
 #   --data-dir          标准化 benchmark 数据目录，默认 data/。
-#   --output-dir        时间目录的父目录，默认当前目录。
+#   --output-dir        时间目录的父目录，默认 results/。
 #   --run-tag           顶层时间目录名；复用同一 tag 可断点续跑。
 #   --force             清空同一 tag 下已有轨迹并重新运行。
 #   --skip-preflight    跳过运行前的 vLLM 健康检查。
@@ -30,5 +30,5 @@ python -u -m reward_harness.benchmark \
   --request-workers 64 \
   --smoke-per-group 0 \
   --seed 42 \
-  --output-dir . \
+  --output-dir results \
   --run-tag "$RUN_TAG"

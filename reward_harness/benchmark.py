@@ -443,7 +443,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Globally sample N cases after adapter loading; 0 keeps all cases.",
     )
-    parser.add_argument("--output-dir", type=Path, default=Path("."))
+    parser.add_argument("--output-dir", type=Path, default=Path("results"))
     parser.add_argument(
         "--run-tag",
         default=None,

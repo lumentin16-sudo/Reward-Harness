@@ -85,7 +85,7 @@ pointwise 输出。没有移植会同时展示多个候选的 pairwise/listwise 
 --workers 4
 --request-workers 16
 --smoke-per-group 2
---output-dir .
+--output-dir results
 --run-tag 20260819_153045
 ```
 
@@ -96,7 +96,7 @@ pointwise 输出。没有移植会同时展示多个候选的 pairwise/listwise 
 每个模型配置的轨迹和汇总结果保存在同一目录：
 
 ```text
-{run_tag}/{benchmark}/{agent}/{model}/
+results/{run_tag}/{benchmark}/{harness}/{model}/
 ├── config.json
 ├── trajectories.jsonl
 └── summary.json
@@ -111,7 +111,7 @@ pointwise 输出。没有移植会同时展示多个候选的 pairwise/listwise 
 Runner 会先为一题生成一次共享 RubricSet，再并行执行每个 Response 的 `score()`，
 随后分别调用对应 Harness 的 `aggregate()`；
 所有 rubric/judge 请求共同受 `--request-workers` 限流。成功响应按 Prompt 哈希
-缓存在 `{run_tag}/.llm_cache/`，断点后可以复用；JSON 解析或接口校验失败时，
+缓存在 `results/{run_tag}/.llm_cache/`，断点后可以复用；JSON 解析或接口校验失败时，
 只清除当前线程对应的坏缓存并重新请求。
 
 增加数据集时，实现 `BenchmarkAdapter` 的三个方法，并在

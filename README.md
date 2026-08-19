@@ -180,11 +180,13 @@ bash run_rmbench_vllm.sh
 
 ### `no_skill`
 
-先根据当前任务生成 task-specific Rubric，再使用同一个 `RubricSet` 分别评价所有候选。它不执行 Skill 选择，是标准的 rubric-based baseline。
+先根据当前任务生成原子、具体、可二值判断的 task-specific Rubric。评分时每条 Rubric 独立调用一次 Judge，只输出 0（FAIL）或 1（PASS）；A 阶段按 Rubric 权重计算加权通过率。它不执行 Skill 选择。
 
 ### `init_skill`
 
-在生成 Rubric 和评分前动态选择 workflow Skill，并把对应提示内容注入模型 Prompt，包括任务目标、约束和 pointwise evidence 等指导。Skill 本身不执行工具调用；额外成本来自 Skill 选择所需的模型请求，因此耗时和 token 用量高于 `no_skill`。
+在生成 Rubric 和评分前动态选择 workflow Skill，并把对应提示内容注入模型 Prompt，包括任务目标、约束和 pointwise evidence 等指导。它同样采用逐 Rubric 独立的 0/1 Judge 和加权通过率聚合。Skill 本身不执行工具调用；额外成本来自 Skill 选择所需的模型请求，因此耗时和 token 用量高于 `no_skill`。
+
+每个 Skill 包含 `name`、`stage`、`description` 和 `content`。`stage` 取 `G`、`J` 或 `A`；选择前通过 `SkillRegistry.for_stage()` 构造独立 pool。目前 `task_objective`、`constraint_analysis` 属于 G，`pointwise_evidence` 属于 J，A pool 为空。同名 Skill 可以出现在不同阶段，但同一阶段内不能重名。
 
 ## RewardSystem 接口
 
@@ -249,7 +251,7 @@ Runner 使用两层并发：
 - `--workers`：同时处理多少道 benchmark 题目，默认 4；
 - `--request-workers`：全局最多允许多少个在途 LLM 请求，默认 16。
 
-同一道题完成一次 Rubric 生成后，它的候选评分请求可以并发执行。Rubric、Skill 选择和 Judge 请求都会经过同一个全局请求上限，因此不会分别无限创建请求。
+同一道题完成一次 Rubric 生成后，不同 Response 可以并发评分；每个 Response 内部按 Rubric 逐条调用 Judge。若一题有 R 个 Response、K 条 Rubric，`no_skill` 需要 R×K 次 Judge 调用，`init_skill` 还会增加 Skill 选择调用。所有请求共用 `--request-workers` 全局上限。
 
 对四卡 DP=4 的 Qwen3-8B，可以从下面的配置开始调试：
 

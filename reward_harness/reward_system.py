@@ -20,7 +20,7 @@ import math
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol, final
+from typing import Any, Literal, Mapping, Protocol, final
 
 
 # ---------------------------------------------------------------------------
@@ -210,16 +210,21 @@ class RubricSet:
 # Workflow Skill 协议
 # ---------------------------------------------------------------------------
 
+SkillStage = Literal["G", "J", "A"]
+
 @dataclass(frozen=True, slots=True)
 class Skill:
     """可由模型选择并注入 Prompt 的静态 workflow 指令。"""
 
     name: str
+    stage: SkillStage
     description: str
     content: str
 
     def __post_init__(self) -> None:
         _require_non_empty(self.name, "skill name")
+        if self.stage not in {"G", "J", "A"}:
+            raise ValueError(f"unknown skill stage: {self.stage!r}")
         _require_non_empty(self.description, "skill description")
         _require_non_empty(self.content, "skill content")
 
@@ -231,13 +236,20 @@ class SkillRegistry:
     skills: tuple[Skill, ...] = ()
 
     def __post_init__(self) -> None:
-        names: list[str] = []
+        keys: list[tuple[SkillStage, str]] = []
         for skill in self.skills:
             if not isinstance(skill, Skill):
                 raise TypeError("SkillRegistry accepts only Skill instances")
-            names.append(skill.name)
-        if len(names) != len(set(names)):
-            raise ValueError("skill names must be unique within a SkillRegistry")
+            keys.append((skill.stage, skill.name))
+        if len(keys) != len(set(keys)):
+            raise ValueError("skill names must be unique within each stage")
+
+    def for_stage(self, stage: SkillStage) -> "SkillRegistry":
+        """返回只包含指定 G/J/A 阶段 Skill 的选择池。"""
+
+        if stage not in {"G", "J", "A"}:
+            raise ValueError(f"unknown skill stage: {stage!r}")
+        return SkillRegistry(tuple(skill for skill in self.skills if skill.stage == stage))
 
     @property
     def names(self) -> frozenset[str]:
@@ -250,7 +262,11 @@ class SkillRegistry:
         """生成模型选择 Skill 时可见的最小目录。"""
 
         return tuple(
-            {"name": skill.name, "description": skill.description}
+            {
+                "name": skill.name,
+                "stage": skill.stage,
+                "description": skill.description,
+            }
             for skill in self.skills
         )
 
@@ -259,7 +275,11 @@ class SkillRegistry:
 
         if len(skill_names) != len(set(skill_names)):
             raise ValueError("a model may call each skill at most once per stage")
-        by_name = {skill.name: skill for skill in self.skills}
+        by_name: dict[str, Skill] = {}
+        for skill in self.skills:
+            if skill.name in by_name:
+                raise ValueError("select skills from a stage-specific registry")
+            by_name[skill.name] = skill
         unknown = set(skill_names) - set(by_name)
         if unknown:
             raise ValueError(f"unknown skill names: {sorted(unknown)}")
@@ -470,6 +490,7 @@ class RewardSystem(ABC):
         return [
             {
                 "name": skill.name,
+                "stage": skill.stage,
                 "content": skill.content,
             }
             for skill in skills

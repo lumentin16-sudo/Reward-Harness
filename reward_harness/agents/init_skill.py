@@ -42,7 +42,12 @@ selected workflow skills. Response answers are intentionally unavailable.
 
 Requirements:
 - Return 2 to 6 non-overlapping rubrics.
-- Each rubric must test one observable property of task success.
+- Each rubric must be one atomic, binary-verifiable requirement observable from
+  a single response and answerable only as PASS or FAIL.
+- Make the pass condition concrete and self-contained. State the required fact,
+  reasoning step, constraint, or behavior; avoid vague criteria such as
+  "correct", "clear", or "high quality" without an explicit test.
+- PASS requires full satisfaction of the condition; partial satisfaction is FAIL.
 - weight must be a positive number representing the rubric's relative importance.
 - Do not include candidate-specific wording or predicted answers.
 - Return JSON only, with this schema:
@@ -50,7 +55,7 @@ Requirements:
   "rubrics": [
     {{
       "rubric_id": "short_unique_id",
-      "criterion": "what should be evaluated",
+      "criterion": "PASS if the response ...; otherwise FAIL",
       "weight": 1.0
     }}
   ]
@@ -79,13 +84,13 @@ Select zero or more useful skills. Return JSON only:
 
 RUBRIC_EVALUATION_PROMPT = """You are a pointwise reward judge.
 
-Evaluate the single candidate against every supplied rubric. Do not compare it
+Evaluate the single response against the one supplied rubric. Do not compare it
 with another answer and do not infer its position in a preference pair.
 
 [Public Task]
 {task_json}
 
-[Shared Rubrics]
+[Single Rubric]
 {rubrics_json}
 
 [Selected Workflow Skills]
@@ -95,10 +100,11 @@ with another answer and do not infer its position in a preference pair.
 {candidate_json}
 
 Requirements:
-- Return exactly one judgment for every rubric_id.
-- score must be an integer from 0 to 5.
+- Return exactly one judgment for the supplied rubric_id.
+- score must be the integer 1 when the response fully satisfies the binary pass
+  condition, otherwise 0. Do not award partial credit.
 - Workflow skills are guidance; scores must still be based on the rubrics.
-- evidence must quote or briefly identify observable candidate content.
+- evidence must quote or briefly identify observable response content.
 - Return JSON only, with this schema:
 {{
   "judgments": [
@@ -115,6 +121,7 @@ Requirements:
 
 TASK_OBJECTIVE_SKILL = Skill(
     name="task_objective",
+    stage="G",
     description="Clarify the user's objective and observable task success.",
     content=(
         "Focus on the user's actual objective, observable correctness, and task "
@@ -124,6 +131,7 @@ TASK_OBJECTIVE_SKILL = Skill(
 
 CONSTRAINT_ANALYSIS_SKILL = Skill(
     name="constraint_analysis",
+    stage="G",
     description="Identify explicit format, content, and prohibited-behavior constraints.",
     content=(
         "Check every explicit requirement independently. Treat requested format and "
@@ -133,11 +141,12 @@ CONSTRAINT_ANALYSIS_SKILL = Skill(
 
 POINTWISE_EVIDENCE_SKILL = Skill(
     name="pointwise_evidence",
+    stage="J",
     description="Ground rubric scoring in observable evidence from one candidate.",
     content=(
         "Use criteria that can be checked from one candidate at a time. For each "
         "criterion, identify observable supporting or contradicting evidence before "
-        "assigning a score."
+        "deciding PASS or FAIL."
     ),
 )
 
@@ -168,14 +177,14 @@ class InitSkillHarness(RewardSystem):
         rubrics: RubricSet,
         judgment_result: JudgmentResult,
     ) -> RewardResult:
-        """A：按本 Harness 的 0～5 评分协议加权聚合并归一化。"""
+        """A：按 Rubric 权重聚合二值 Judgment。"""
 
         judgments = judgment_result.judgments
         if not judgments:
             raise ValueError("cannot aggregate an empty judgment set")
         for judgment in judgments:
-            if not isinstance(judgment.score, int) or not 0 <= judgment.score <= 5:
-                raise ValueError("init_skill expects integer scores in [0, 5]")
+            if not isinstance(judgment.score, int) or judgment.score not in {0, 1}:
+                raise ValueError("init_skill expects binary integer scores 0 or 1")
 
         judgment_by_id = {judgment.rubric_id: judgment for judgment in judgments}
         total_weight = sum(rubric.weight for rubric in rubrics.rubrics)
@@ -183,18 +192,18 @@ class InitSkillHarness(RewardSystem):
             rubric.weight * judgment_by_id[rubric.rubric_id].score
             for rubric in rubrics.rubrics
         )
-        reward = weighted_score / (5.0 * total_weight)
+        reward = weighted_score / total_weight
         return RewardResult(
             query_id=task.query_id,
             response_id=candidate.response_id,
             reward=reward,
-            metadata={"aggregation": "weighted_mean"},
+            metadata={"aggregation": "weighted_binary_mean"},
         )
 
     def build_rubrics(self, task: Query) -> RubricSet:
         """由 Rubric Model 选择 Skill，再生成共享 RubricSet。"""
 
-        registry = self.get_skill_registry(task)
+        registry = self.get_skill_registry(task).for_stage("G")
         task_payload = self._task_payload(task)
         selection_prompt = self.rubric_skill_selection_prompt.format(
             task_json=json.dumps(task_payload, ensure_ascii=False, indent=2),
@@ -234,7 +243,7 @@ class InitSkillHarness(RewardSystem):
     ) -> JudgmentResult:
         """由 Reward Model 选择 Skill，再依据共享 Rubric 为单个候选评分。"""
 
-        registry = self.get_skill_registry(task)
+        registry = self.get_skill_registry(task).for_stage("J")
         task_payload = self._task_payload(task)
         rubrics_payload = self._rubrics_payload(rubrics)
         candidate_payload = self._candidate_payload(candidate)
@@ -250,25 +259,41 @@ class InitSkillHarness(RewardSystem):
         skill_calls = self._parse_skill_calls(raw_selection, registry)
         selected_skills = registry.select(skill_calls)
 
-        prompt = self.judge_prompt_template.format(
-            task_json=json.dumps(task_payload, ensure_ascii=False, indent=2),
-            rubrics_json=json.dumps(rubrics_payload, ensure_ascii=False, indent=2),
-            skills_json=json.dumps(
-                self._skills_payload(selected_skills),
-                ensure_ascii=False,
-                indent=2,
-            ),
-            candidate_json=json.dumps(candidate_payload, ensure_ascii=False, indent=2),
-        )
-        raw_response = self.judge_llm(prompt)
-        judgments = self._parse_judgments(raw_response, rubrics)
+        judgments = []
+        for rubric in rubrics.rubrics:
+            single_rubric_set = RubricSet(
+                query_id=rubrics.query_id,
+                rubrics=(rubric,),
+            )
+            prompt = self.judge_prompt_template.format(
+                task_json=json.dumps(task_payload, ensure_ascii=False, indent=2),
+                rubrics_json=json.dumps(
+                    self._rubrics_payload(single_rubric_set),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                skills_json=json.dumps(
+                    self._skills_payload(selected_skills),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                candidate_json=json.dumps(
+                    candidate_payload, ensure_ascii=False, indent=2
+                ),
+            )
+            raw_response = self.judge_llm(prompt)
+            judgments.extend(
+                self._parse_judgments(raw_response, single_rubric_set)
+            )
 
         return JudgmentResult(
             query_id=task.query_id,
             response_id=candidate.response_id,
-            judgments=judgments,
+            judgments=tuple(judgments),
             metadata={
                 "selected_skills": list(skill_calls),
                 "skills": self._skills_payload(selected_skills),
+                "grading": "independent_per_rubric",
+                "score_scale": "binary",
             },
         )

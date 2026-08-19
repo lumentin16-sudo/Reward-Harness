@@ -110,6 +110,8 @@ results/{run_tag}/{benchmark}/{harness}/{model}/
 
 Runner 会先为一题生成一次共享 RubricSet，再并行执行每个 Response 的 `score()`，
 随后分别调用对应 Harness 的 `aggregate()`；
+当前 `no_skill` 和 `init_skill` 会对每条 Rubric 单独调用 Judge，输出 0/1 Judgment，
+再按权重计算通过率；
 所有 rubric/judge 请求共同受 `--request-workers` 限流。成功响应按 Prompt 哈希
 缓存在 `results/{run_tag}/.llm_cache/`，断点后可以复用；JSON 解析或接口校验失败时，
 只清除当前线程对应的坏缓存并重新请求。

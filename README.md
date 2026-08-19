@@ -14,7 +14,7 @@ Reward-Harness 是一个面向生成式 Reward Model / LLM-as-a-Judge 的评测�
 - 数据准备与模型评测解耦；评测阶段不会隐式下载数据。
 - 双层并发、请求限流、LLM 响应缓存、错误重试和中断续跑。
 - 保存逐题轨迹、原始模型响应、Rubric、Judgment、token、延迟和汇总指标。
-- 使用运行签名识别相同实验；已完成的相同配置会自动跳过。
+- 使用顶层时间 tag 隔离每次实验；复用同一 tag 可以断点续跑。
 
 ## 目录结构
 
@@ -39,7 +39,7 @@ Reward-Harness/
 └── run_*_vllm.sh                   # 常用运行脚本
 ```
 
-标准化 benchmark 数据位于 `data/` 并随仓库提交；运行日志和结果分别写入 `logs/`、`results/`，不会提交到 Git。
+标准化 benchmark 数据位于 `data/` 并随仓库提交；每次运行的轨迹和结果统一写入顶层时间目录，该目录不会提交到 Git。
 
 ## 环境准备
 
@@ -261,35 +261,33 @@ Runner 使用两层并发：
 
 ## 结果、轨迹与断点续跑
 
-轨迹日志和最终结果分开保存：
+每个模型配置的轨迹和汇总结果统一保存在同一目录：
 
 ```text
-logs/reward_agent/{benchmark}/{agent}/{model}_{signature}/
+{run_tag}/{benchmark}/{agent}/{model}/
 ├── config.json
-└── trajectories.jsonl
-
-results/reward_agent/{benchmark}/{agent}/{model}_{signature}/
-├── config.json
+├── trajectories.jsonl
 └── summary.json
 ```
 
 - `trajectories.jsonl`：唯一的完整轨迹文件。每行独立保存 Query、Responses、evaluator-only gold、Harness metadata、Rubrics、JudgmentResults、RewardResults、完整模型请求响应、token、延迟、错误和 benchmark 单题结果，可直接作为 Harness Optimization 的输入。
-- `summary.json`：benchmark 指标、错误数、token/延迟统计、运行签名和轨迹文件位置。
+- `summary.json`：benchmark 指标、错误数、token/延迟统计和轨迹文件位置。
 - `config.json`：脱敏后的模型配置、数据配置、Agent 文件及源码 SHA-256。
 
 成功的模型响应还会缓存在：
 
 ```text
-logs/reward_agent/.llm_cache/
+{run_tag}/.llm_cache/
 ```
 
-Runner 默认自动续跑：
+Runner 在同一个时间 tag 内自动续跑：
 
-- 如果同一运行签名已有完整 `summary.json`，直接跳过；
+- 如果当前 tag 下已有完整 `summary.json`，直接跳过；
 - 如果只存在部分 `trajectories.jsonl`，从未完成的 case 继续；
-- 修改 Agent、数据、模型或抽样配置会生成新的运行签名和独立目录；
-- `--resume` 仅作为兼容参数保留，不需要显式传入；
-- 使用 `--force` 可以强制重新评测相同配置。
+- 默认 tag 是启动时的本地时间 `YYYYMMDD_HHMMSS`；
+- 中断后使用同一个 `--run-tag` 才会继续原目录；
+- 修改 Agent、数据、模型或抽样配置时应使用新的 tag；
+- 使用 `--force` 会清空同一 tag 下的已有轨迹并重新评测。
 
 API 请求或 JSON/schema 解析在重试后仍失败时，该 case 会记录 `error` 并按错误计分，runner 会继续处理其他样本。
 
@@ -307,9 +305,9 @@ API 请求或 JSON/schema 解析在重试后仍失败时，该 case 会记录 `e
 --base-url         vLLM OpenAI-compatible API 地址
 --model            服务端模型名，默认 Qwen/Qwen3-8B
 --data-dir         标准化 benchmark 数据目录
---logs-dir         轨迹目录，默认 logs/reward_agent
---results-dir      汇总结果目录，默认 results/reward_agent
---force            强制重跑相同配置
+--output-dir       时间目录的父目录，默认当前目录
+--run-tag          顶层运行目录名，默认 YYYYMMDD_HHMMSS
+--force            清空当前 tag 并重新运行
 --skip-preflight   跳过启动前的 vLLM 单请求检查
 ```
 

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import inspect
 import json
 import random
 import re
@@ -12,12 +10,13 @@ import sys
 import time
 from concurrent.futures import Executor, ThreadPoolExecutor, as_completed
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from .agent_loader import DEFAULT_AGENTS_DIR, HarnessSpec, discover_harnesses
 from .benchmarks import ADAPTERS, BenchmarkAdapter, BenchmarkCase
-from .benchmarks.base import DEFAULT_DATA_ROOT, processed_paths
+from .benchmarks.base import DEFAULT_DATA_ROOT
 from .model_client import RecordingLLM, VLLMBackend
 from .reward_system import JudgmentResult, RewardResult, RewardSystem, RubricSet
 
@@ -32,89 +31,25 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def _slug(value: str) -> str:
-    """把模型/agent 名称转换成稳定的目录名。"""
+def _path_name(value: str) -> str:
+    """把模型名称转换成安全且可读的目录名。"""
 
-    normalized = re.sub(r"[^a-zA-Z0-9_.-]+", "-", value).strip("-.")
-    return normalized.lower() or "unnamed"
-
-
-def _sha256_files(paths: list[Path]) -> str:
-    digest = hashlib.sha256()
-    for path in sorted({item.resolve() for item in paths}, key=str):
-        digest.update(str(path).encode("utf-8"))
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
+    return re.sub(r"[^a-zA-Z0-9_.-]+", "-", value).strip("-.") or "unnamed"
 
 
-def _run_signature(
+def _run_directory(
     *,
-    adapter: BenchmarkAdapter,
-    cases: list[BenchmarkCase],
-    harness: HarnessSpec,
-    base_url: str,
-    model: str,
-    smoke_per_group: int,
-    sample_size: int,
-    seed: int,
-) -> str:
-    """绑定数据、agent、evaluator、模型和抽样配置，避免错误复用旧结果。"""
-
-    _, manifest_path = processed_paths(
-        adapter.data_root, benchmark=adapter.name, split=adapter.split
-    )
-    evaluator_sha = _sha256_files(
-        [
-            Path(__file__),
-            Path(inspect.getfile(type(adapter))),
-            Path(inspect.getfile(RewardSystem)),
-            Path(inspect.getfile(VLLMBackend)),
-        ]
-    )
-    payload = {
-        "benchmark": adapter.name,
-        "dataset_manifest_sha256": hashlib.sha256(
-            manifest_path.read_bytes()
-        ).hexdigest(),
-        "case_ids_sha256": hashlib.sha256(
-            "\n".join(case.case_id for case in cases).encode("utf-8")
-        ).hexdigest(),
-        "agent_name": harness.name,
-        "agent_source_sha256": harness.source_sha256,
-        "evaluator_sha256": evaluator_sha,
-        "backend": "vllm",
-        "base_url": base_url.rstrip("/"),
-        "model": model,
-        "temperature": 0.0,
-        "max_tokens": 2048,
-        "enable_thinking": False,
-        "smoke_per_group": smoke_per_group,
-        "sample_size": sample_size,
-        "seed": seed,
-    }
-    return hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-
-
-def _run_directories(
-    *,
-    logs_root: Path,
-    results_root: Path,
+    run_root: Path,
     benchmark: str,
     harness: str,
     model: str,
-    run_signature: str,
-) -> tuple[Path, Path]:
-    leaf = f"{_slug(model.split('/')[-1])}_{run_signature[:12]}"
-    relative = Path(benchmark) / harness / leaf
-    return logs_root / relative, results_root / relative
+) -> Path:
+    return run_root / benchmark / harness / _path_name(model.split("/")[-1])
 
 
 def _usable_summary(
     path: Path,
     *,
-    run_signature: str,
     expected_cases: int,
 ) -> dict[str, Any] | None:
     try:
@@ -124,7 +59,6 @@ def _usable_summary(
     if (
         isinstance(value, dict)
         and value.get("status") == "complete"
-        and value.get("run_signature") == run_signature
         and value.get("num_cases") == expected_cases
     ):
         return value
@@ -166,8 +100,8 @@ def evaluate_case(
     outcome: dict[str, Any] = {
         "case_id": case.case_id,
         "group": case.group,
-        "task": _jsonable(case.task),
-        "candidates": _jsonable(case.candidates),
+        "query": _jsonable(case.task),
+        "responses": _jsonable(case.candidates),
         "gold": _jsonable(case.gold),
         "rubrics": None,
         "judgment_results": [],
@@ -330,9 +264,7 @@ def run_configuration(
     harness: HarnessSpec,
     cases: list[BenchmarkCase],
     backend: VLLMBackend,
-    logs_root: Path,
-    results_root: Path,
-    run_signature: str,
+    run_root: Path,
     workers: int,
     force: bool,
     stage_retries: int,
@@ -342,19 +274,16 @@ def run_configuration(
     sample_size: int = 0,
     data_dir: Path | None = None,
 ) -> dict[str, Any]:
-    log_directory, result_directory = _run_directories(
-        logs_root=logs_root,
-        results_root=results_root,
+    run_directory = _run_directory(
+        run_root=run_root,
         benchmark=adapter.name,
         harness=harness.name,
         model=backend.model,
-        run_signature=run_signature,
     )
-    summary_path = result_directory / "summary.json"
+    summary_path = run_directory / "summary.json"
     if not force:
         completed_summary = _usable_summary(
             summary_path,
-            run_signature=run_signature,
             expected_cases=len(cases),
         )
         if completed_summary is not None:
@@ -365,9 +294,8 @@ def run_configuration(
             )
             return completed_summary
 
-    log_directory.mkdir(parents=True, exist_ok=True)
-    result_directory.mkdir(parents=True, exist_ok=True)
-    trajectories_path = log_directory / "trajectories.jsonl"
+    run_directory.mkdir(parents=True, exist_ok=True)
+    trajectories_path = run_directory / "trajectories.jsonl"
     raw_existing = [] if force else _read_jsonl(trajectories_path)
     target_ids = {case.case_id for case in cases}
     # 同一个 case 若因历史中断留下重复行，以最后一条完整记录为准。
@@ -384,7 +312,6 @@ def run_configuration(
 
     config = {
         "status": "running",
-        "run_signature": run_signature,
         "benchmark": adapter.name,
         "dataset_id": adapter.dataset_id,
         "split": adapter.split,
@@ -412,8 +339,7 @@ def run_configuration(
         "trajectories": str(trajectories_path.resolve()),
         "summary": str(summary_path.resolve()),
     }
-    _write_json(log_directory / "config.json", config)
-    _write_json(result_directory / "config.json", config)
+    _write_json(run_directory / "config.json", config)
 
     with trajectories_path.open("a", encoding="utf-8", buffering=1) as stream:
         with (
@@ -441,8 +367,8 @@ def run_configuration(
                     row = adapter.score_outcome({
                         "case_id": case_id,
                         "group": case.group,
-                        "task": _jsonable(case.task),
-                        "candidates": _jsonable(case.candidates),
+                        "query": _jsonable(case.task),
+                        "responses": _jsonable(case.candidates),
                         "gold": _jsonable(case.gold),
                         "rubrics": None,
                         "judgment_results": [],
@@ -455,7 +381,6 @@ def run_configuration(
                 row = {
                     "benchmark": adapter.name,
                     "harness": harness.name,
-                    "run_signature": run_signature,
                     **row,
                 }
                 stream.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -478,15 +403,13 @@ def run_configuration(
     summary = adapter.summarize(existing)
     summary["agent"] = harness.name
     summary["status"] = "complete"
-    summary["run_signature"] = run_signature
     summary["trajectory_path"] = str(trajectories_path.resolve())
     summary["usage"] = {
         key: sum(float(row.get("usage", {}).get(key, 0)) for row in existing)
         for key in ("input_tokens", "output_tokens", "latency_ms")
     }
     config["status"] = "complete"
-    _write_json(log_directory / "config.json", config)
-    _write_json(result_directory / "config.json", config)
+    _write_json(run_directory / "config.json", config)
     _write_json(summary_path, summary)
     return summary
 
@@ -520,8 +443,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Globally sample N cases after adapter loading; 0 keeps all cases.",
     )
-    parser.add_argument("--logs-dir", type=Path, default=Path("logs/reward_agent"))
-    parser.add_argument("--results-dir", type=Path, default=Path("results/reward_agent"))
+    parser.add_argument("--output-dir", type=Path, default=Path("."))
+    parser.add_argument(
+        "--run-tag",
+        default=None,
+        help="Top-level run directory name; default is local time YYYYMMDD_HHMMSS.",
+    )
     parser.add_argument(
         "--data-dir",
         type=Path,
@@ -529,14 +456,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory containing pre-generated normalized benchmark data.",
     )
     parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Deprecated compatibility flag; resume and completed-run skipping are automatic.",
-    )
-    parser.add_argument(
         "--force",
         action="store_true",
-        help="Re-evaluate even when an identical completed run already exists.",
+        help="Re-evaluate and replace existing files under the selected run tag.",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--stage-retries", type=int, default=2)
@@ -546,6 +468,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    run_tag = args.run_tag or datetime.now().strftime("%Y%m%d_%H%M%S")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", run_tag):
+        raise SystemExit("run-tag may contain only letters, digits, dot, underscore and dash")
+    run_root = args.output_dir.resolve() / run_tag
     if (
         args.workers < 1
         or args.request_workers < 1
@@ -600,38 +526,25 @@ def main(argv: list[str] | None = None) -> int:
 
     base_url = args.base_url or "http://127.0.0.1:8000/v1"
 
-    jobs: list[tuple[BenchmarkAdapter, list[BenchmarkCase], HarnessSpec, str]] = []
+    jobs: list[tuple[BenchmarkAdapter, list[BenchmarkCase], HarnessSpec]] = []
     for adapter, cases in prepared:
         for harness in harnesses:
-            signature = _run_signature(
-                adapter=adapter,
-                cases=cases,
-                harness=harness,
-                base_url=base_url,
-                model=args.model,
-                smoke_per_group=args.smoke_per_group,
-                sample_size=args.sample_size,
-                seed=args.seed,
-            )
-            jobs.append((adapter, cases, harness, signature))
+            jobs.append((adapter, cases, harness))
 
     if not args.force:
         incomplete_jobs = []
-        for adapter, cases, harness, signature in jobs:
-            _, result_directory = _run_directories(
-                logs_root=args.logs_dir,
-                results_root=args.results_dir,
+        for adapter, cases, harness in jobs:
+            run_directory = _run_directory(
+                run_root=run_root,
                 benchmark=adapter.name,
                 harness=harness.name,
                 model=args.model,
-                run_signature=signature,
             )
             if _usable_summary(
-                result_directory / "summary.json",
-                run_signature=signature,
+                run_directory / "summary.json",
                 expected_cases=len(cases),
             ) is None:
-                incomplete_jobs.append((adapter, cases, harness, signature))
+                incomplete_jobs.append((adapter, cases, harness))
             else:
                 print(
                     f"[{adapter.name}/{harness.name}] SKIP already evaluated",
@@ -646,7 +559,7 @@ def main(argv: list[str] | None = None) -> int:
         base_url=base_url,
         model=args.model,
         request_workers=args.request_workers,
-        cache_dir=args.logs_dir / ".llm_cache",
+        cache_dir=run_root / ".llm_cache",
     )
     if not args.skip_preflight:
         preflight: RecordingLLM = backend.recorder("rubric", use_cache=False)
@@ -662,15 +575,14 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
-    for adapter, cases, harness, signature in jobs:
+    print(f"Run directory: {run_root}", flush=True)
+    for adapter, cases, harness in jobs:
         summary = run_configuration(
             adapter=adapter,
             harness=harness,
             cases=cases,
             backend=backend,
-            logs_root=args.logs_dir,
-            results_root=args.results_dir,
-            run_signature=signature,
+            run_root=run_root,
             workers=args.workers,
             force=args.force,
             stage_retries=args.stage_retries,

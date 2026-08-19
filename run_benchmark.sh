@@ -2,6 +2,7 @@
 set -euo pipefail
 
 VLLM_BASE_URL="${VLLM_BASE_URL:-http://127.0.0.1:8000/v1}"
+RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 
 # reward_harness.benchmark 参数说明：
 #   --base-url          vLLM 的 OpenAI-compatible API 地址。
@@ -16,13 +17,11 @@ VLLM_BASE_URL="${VLLM_BASE_URL:-http://127.0.0.1:8000/v1}"
 #   --seed              抽样随机种子。
 #   --stage-retries     Rubric/Judge 阶段失败后的重试次数。
 #   --data-dir          标准化 benchmark 数据目录，默认 data/。
-#   --logs-dir          逐题轨迹和 LLM 缓存目录。
-#   --results-dir       汇总指标目录。
-#   --force             强制重新运行已经完成的相同配置。
+#   --output-dir        时间目录的父目录，默认当前目录。
+#   --run-tag           顶层时间目录名；复用同一 tag 可断点续跑。
+#   --force             清空同一 tag 下已有轨迹并重新运行。
 #   --skip-preflight    跳过运行前的 vLLM 健康检查。
 #
-# 续跑默认自动启用，不需要设置 --resume。
-
 python -u -m reward_harness.benchmark \
   --base-url "$VLLM_BASE_URL" \
   --model Qwen/Qwen3-8B \
@@ -31,5 +30,5 @@ python -u -m reward_harness.benchmark \
   --request-workers 64 \
   --smoke-per-group 0 \
   --seed 42 \
-  --logs-dir logs/reward_agent \
-  --results-dir results/reward_agent
+  --output-dir . \
+  --run-tag "$RUN_TAG"

@@ -85,37 +85,33 @@ pointwise 输出。没有移植会同时展示多个候选的 pairwise/listwise 
 --workers 4
 --request-workers 16
 --smoke-per-group 2
---logs-dir logs/reward_agent
---results-dir results/reward_agent
+--output-dir .
+--run-tag 20260819_153045
 ```
 
-每次运行会根据数据 manifest、样本 ID、agent 源码、evaluator 代码、模型和抽样配置生成
-`run_signature`。相同签名已经存在完整 `summary.json` 时会自动跳过；部分运行则自动读取
-已有轨迹继续执行。修改 agent 代码会得到新的签名和独立目录。仅在明确需要重跑时使用
-`--force`。
+默认使用启动时的本地时间 `YYYYMMDD_HHMMSS` 作为顶层运行目录。复用同一个
+`--run-tag` 时，完整结果会跳过，部分轨迹会按 case ID 续跑。修改 agent、模型、数据或
+抽样配置时应使用新的 tag；`--force` 会清空当前 tag 下的已有轨迹并重新评测。
 
-目录结构参考原 Meta-Harness，把轨迹日志和最终结果分开：
+每个模型配置的轨迹和汇总结果保存在同一目录：
 
 ```text
-logs/reward_agent/{benchmark}/{agent}/{model}_{signature}/
+{run_tag}/{benchmark}/{agent}/{model}/
 ├── config.json
-└── trajectories.jsonl
-
-results/reward_agent/{benchmark}/{agent}/{model}_{signature}/
-├── config.json
+├── trajectories.jsonl
 └── summary.json
 ```
 
 - `trajectories.jsonl`：唯一的完整轨迹文件。每行独立包含 Query、Responses、
   evaluator-only gold、Harness metadata、Rubrics、JudgmentResults、RewardResults、完整模型请求响应、
   token、延迟、错误及 benchmark 单题结果，可直接作为 Harness Optimization 输入。
-- `summary.json`：数据集指标、错误数量、token/延迟汇总、运行签名和轨迹文件路径。
+- `summary.json`：数据集指标、错误数量、token/延迟汇总和轨迹文件路径。
 - `config.json`：脱敏模型配置、agent 文件及 SHA-256、数据目录和结果路径。
 
 Runner 会先为一题生成一次共享 RubricSet，再并行执行每个 Response 的 `score()`，
 随后分别调用对应 Harness 的 `aggregate()`；
 所有 rubric/judge 请求共同受 `--request-workers` 限流。成功响应按 Prompt 哈希
-缓存在 `{logs-dir}/.llm_cache/`，断点后可以复用；JSON 解析或接口校验失败时，
+缓存在 `{run_tag}/.llm_cache/`，断点后可以复用；JSON 解析或接口校验失败时，
 只清除当前线程对应的坏缓存并重新请求。
 
 增加数据集时，实现 `BenchmarkAdapter` 的三个方法，并在

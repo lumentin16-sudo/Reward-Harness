@@ -107,12 +107,13 @@ results/reward_agent/{benchmark}/{agent}/{model}_{signature}/
 ```
 
 - `trajectories.jsonl`：唯一的完整轨迹文件。每行独立包含 Query、Responses、
-  evaluator-only gold、Harness metadata、Rubrics、Judgments、Reward、完整模型请求响应、
+  evaluator-only gold、Harness metadata、Rubrics、JudgmentResults、RewardResults、完整模型请求响应、
   token、延迟、错误及 benchmark 单题结果，可直接作为 Harness Optimization 输入。
 - `summary.json`：数据集指标、错误数量、token/延迟汇总、运行签名和轨迹文件路径。
 - `config.json`：脱敏模型配置、agent 文件及 SHA-256、数据目录和结果路径。
 
-Runner 会先为一题生成一次共享 RubricSet，再并行执行该题的候选 `score()`；
+Runner 会先为一题生成一次共享 RubricSet，再并行执行每个 Response 的 `score()`，
+随后分别调用对应 Harness 的 `aggregate()`；
 所有 rubric/judge 请求共同受 `--request-workers` 限流。成功响应按 Prompt 哈希
 缓存在 `{logs-dir}/.llm_cache/`，断点后可以复用；JSON 解析或接口校验失败时，
 只清除当前线程对应的坏缓存并重新请求。

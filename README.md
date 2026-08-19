@@ -203,13 +203,22 @@ class MyHarness(RewardSystem):
         task: Query,
         candidate: Response,
         rubrics: RubricSet,
+    ) -> JudgmentResult:
+        ...
+
+    def aggregate(
+        self,
+        task: Query,
+        candidate: Response,
+        rubrics: RubricSet,
+        judgment_result: JudgmentResult,
     ) -> RewardResult:
         ...
 ```
 
-`RewardSystem` 不规定 Judge 原始分数的尺度或聚合公式。Harness 在 `score()` 中自行解析 Judgment、执行聚合并生成 `RewardResult`；例如可以使用 0～5 加权平均、0～10 平均、最低项或硬约束策略。公共协议只要求每条 Rubric 恰好有一项 Judgment，并且最终 `RewardResult.reward` 归一化到 `[0,1]`。
+`score()` 只负责 J 阶段并返回 `JudgmentResult`；`aggregate()` 负责 A 阶段，把 Judgment 聚合成 `RewardResult`。Harness 可以使用 0～5 加权平均、0～10 平均、最低项或硬约束策略。公共协议只要求每条 Rubric 恰好有一项 Judgment，并且最终 `RewardResult.reward` 归一化到 `[0,1]`。
 
-Benchmark runner 直接编排这三个接口：每条 Query 调用一次 `build_rubrics()`，再用同一个 `RubricSet` 并发调用每个 Response 的 `score()`。这样 runner 可以统一处理分阶段重试、结果校验、完整轨迹和中断续跑。
+Benchmark runner 直接编排这四个接口：每条 Query 调用一次 `build_rubrics()`，再用同一个 `RubricSet` 为每个 Response 执行 `score()` 和 `aggregate()`。这样 runner 可以分别记录 G/J/A、分阶段校验错误，并统一处理并发、重试、完整轨迹和中断续跑。
 
 把新的实现保存为 `reward_harness/agents/my_harness.py` 后，runner 会自动发现其中的 `RewardSystem` 子类。文件名 `my_harness` 就是 `--agents my_harness` 使用的名称。`__init__.py` 和以下划线开头的文件不会被扫描。
 
@@ -264,7 +273,7 @@ results/reward_agent/{benchmark}/{agent}/{model}_{signature}/
 └── summary.json
 ```
 
-- `trajectories.jsonl`：唯一的完整轨迹文件。每行独立保存 Query、Responses、evaluator-only gold、Harness metadata、Rubrics、Judgments、Reward、完整模型请求响应、token、延迟、错误和 benchmark 单题结果，可直接作为 Harness Optimization 的输入。
+- `trajectories.jsonl`：唯一的完整轨迹文件。每行独立保存 Query、Responses、evaluator-only gold、Harness metadata、Rubrics、JudgmentResults、RewardResults、完整模型请求响应、token、延迟、错误和 benchmark 单题结果，可直接作为 Harness Optimization 的输入。
 - `summary.json`：benchmark 指标、错误数、token/延迟统计、运行签名和轨迹文件位置。
 - `config.json`：脱敏后的模型配置、数据配置、Agent 文件及源码 SHA-256。
 

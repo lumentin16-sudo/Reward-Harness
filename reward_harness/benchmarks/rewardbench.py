@@ -128,7 +128,9 @@ class RewardBenchAdapter(BenchmarkAdapter):
     def score_outcome(self, outcome: dict[str, Any]) -> dict[str, Any]:
         score = 0.0
         if not outcome.get("error"):
-            rewards = [float(item["reward"]) for item in outcome["results"]]
+            rewards = [
+                float(item["reward"]) for item in outcome["reward_results"]
+            ]
             if len(rewards) == 2:
                 # RewardBench 官方使用严格大于；相等按错误处理。
                 score = float(rewards[0] > rewards[1])

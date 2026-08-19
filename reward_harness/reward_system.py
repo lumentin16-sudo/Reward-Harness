@@ -8,9 +8,9 @@
 4. 校验 Harness 输出、Rubric 覆盖关系和最终奖励；
 5. 保持业务结果可序列化，完整执行轨迹由 benchmark runner 统一记录。
 
-候选 Harness 的搜索边界只有三个公开接口：
-``get_skill_registry``、``build_rubrics`` 和 ``score``。候选可以自由设计
-Skill、Prompt、G/J 调用流程和奖励聚合策略，但不能修改公共 payload 协议。
+候选 Harness 的搜索边界有四个公开接口：``get_skill_registry``、
+``build_rubrics``、``score`` 和 ``aggregate``。候选可以自由设计 Skill、
+Prompt、G/J/A 调用流程和奖励聚合策略，但不能修改公共 payload 协议。
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import math
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Mapping, Protocol, final
+from typing import Any, Mapping, Protocol, final
 
 
 # ---------------------------------------------------------------------------
@@ -294,13 +294,27 @@ class RubricJudgment:
 
 
 @dataclass(frozen=True, slots=True)
+class JudgmentResult:
+    """J 阶段对单个 Response 产生的 RubricJudgment 集合。"""
+
+    query_id: str
+    response_id: str
+    judgments: tuple[RubricJudgment, ...]
+    metadata: Mapping[str, JSONValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.query_id, "query_id")
+        _require_non_empty(self.response_id, "response_id")
+        _json_safe(dict(self.metadata), "metadata")
+
+
+@dataclass(frozen=True, slots=True)
 class RewardResult:
-    """单个候选的逐项评分、归一化奖励和 Harness 元数据。"""
+    """A 阶段对单个 Response 产生的归一化最终奖励。"""
 
     query_id: str  # 防止结果被绑定到其他任务
     response_id: str  # 防止结果被绑定到另一个候选
     reward: float  # 最终标量奖励，范围固定为 [0, 1]
-    judgments: tuple[RubricJudgment, ...] = ()
     metadata: Mapping[str, JSONValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -323,18 +337,16 @@ class RewardSystem(ABC):
         - ``get_skill_registry``：Skill 的内容、数量和组织方式；
         - ``build_rubrics``：Rubric Prompt、Skill 选择和 G 调用流程；
         - ``score``：Judge Prompt、Skill 选择和 J 调用流程。
+        - ``aggregate``：原始分数校验、聚合与 A 阶段输出。
 
     固定部分：
         - 输入 payload 与 JSON 输出协议；
         - Rubric 覆盖、结果绑定和最终 reward 范围校验；
         - Query、Response、Rubric 和 RewardResult 的绑定关系。
 
-    原始 Judge 分数尺度和聚合方式属于 Harness 的 ``score`` 实现；所有 Harness
-    只需把最终 ``RewardResult.reward`` 归一化到 [0, 1]。
+    原始 Judge 分数尺度和聚合方式属于 Harness 的 ``aggregate`` 实现；所有
+    Harness 只需把最终 ``RewardResult.reward`` 归一化到 [0, 1]。
     """
-
-    min_rubrics: ClassVar[int] = 2
-    max_rubrics: ClassVar[int] = 6
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """在候选类定义时立即拒绝对固定协议的覆盖。"""
@@ -391,8 +403,18 @@ class RewardSystem(ABC):
         task: Query,
         candidate: Response,
         rubrics: RubricSet,
+    ) -> JudgmentResult:
+        """候选接口 3（J）：根据共享 Rubric 为当前单个 Response 评分。"""
+
+    @abstractmethod
+    def aggregate(
+        self,
+        task: Query,
+        candidate: Response,
+        rubrics: RubricSet,
+        judgment_result: JudgmentResult,
     ) -> RewardResult:
-        """候选接口 3：根据共享 Rubric 为当前单个候选评分。"""
+        """候选接口 4（A）：把 J 阶段结果聚合为 [0, 1] 最终奖励。"""
 
     @staticmethod
     @final
@@ -570,32 +592,40 @@ class RewardSystem(ABC):
         return tuple(parsed[rubric.rubric_id] for rubric in rubrics.rubrics)
 
     def _validate_rubric_set(self, task: Query, rubrics: RubricSet) -> None:
-        """校验候选生成的 RubricSet 是否属于当前任务且数量合规。"""
+        """校验 Harness 生成的 RubricSet 是否属于当前 Query。"""
 
         if rubrics.query_id != task.query_id:
             raise ValueError("RubricSet.query_id does not match the task")
-        if not self.min_rubrics <= len(rubrics.rubrics) <= self.max_rubrics:
-            raise ValueError(
-                f"expected {self.min_rubrics}..{self.max_rubrics} rubrics, "
-                f"got {len(rubrics.rubrics)}"
-            )
+
+    @staticmethod
+    def _validate_judgment_result(
+        task: Query,
+        candidate: Response,
+        rubrics: RubricSet,
+        result: JudgmentResult,
+    ) -> None:
+        """校验 J 阶段结果的绑定关系和 Rubric 覆盖完整性。"""
+
+        if result.query_id != task.query_id:
+            raise ValueError("JudgmentResult.query_id does not match the task")
+        if result.response_id != candidate.response_id:
+            raise ValueError("JudgmentResult.response_id does not match the response")
+
+        judged_ids = [judgment.rubric_id for judgment in result.judgments]
+        if len(judged_ids) != len(set(judged_ids)):
+            raise ValueError("a JudgmentResult may judge each rubric only once")
+        if frozenset(judged_ids) != rubrics.rubric_ids:
+            raise ValueError("judgments must cover every shared rubric")
 
     @staticmethod
     def _validate_reward_result(
         task: Query,
         candidate: Response,
-        rubrics: RubricSet,
         result: RewardResult,
     ) -> None:
-        """校验单候选结果的绑定关系和 Rubric 覆盖完整性。"""
+        """校验 A 阶段最终奖励与当前 Query/Response 的绑定关系。"""
 
         if result.query_id != task.query_id:
             raise ValueError("RewardResult.query_id does not match the task")
         if result.response_id != candidate.response_id:
-            raise ValueError("RewardResult.response_id does not match the candidate")
-
-        judged_ids = [judgment.rubric_id for judgment in result.judgments]
-        if len(judged_ids) != len(set(judged_ids)):
-            raise ValueError("a RewardResult may judge each rubric only once")
-        if frozenset(judged_ids) != rubrics.rubric_ids:
-            raise ValueError("judgments must cover every shared rubric")
+            raise ValueError("RewardResult.response_id does not match the response")

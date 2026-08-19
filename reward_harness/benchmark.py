@@ -19,7 +19,7 @@ from .agent_loader import DEFAULT_AGENTS_DIR, HarnessSpec, discover_harnesses
 from .benchmarks import ADAPTERS, BenchmarkAdapter, BenchmarkCase
 from .benchmarks.base import DEFAULT_DATA_ROOT, processed_paths
 from .model_client import RecordingLLM, VLLMBackend
-from .reward_system import RewardResult, RewardSystem, RubricSet
+from .reward_system import JudgmentResult, RewardResult, RewardSystem, RubricSet
 
 
 def _jsonable(value: Any) -> Any:
@@ -170,7 +170,8 @@ def evaluate_case(
         "candidates": _jsonable(case.candidates),
         "gold": _jsonable(case.gold),
         "rubrics": None,
-        "results": [],
+        "judgment_results": [],
+        "reward_results": [],
         "error": None,
     }
 
@@ -190,17 +191,44 @@ def evaluate_case(
         return outcome
     outcome["rubrics"] = _jsonable(rubrics)
 
-    def score_candidate(candidate) -> tuple[RewardResult | None, str | None]:
-        def score() -> RewardResult:
+    def score_candidate(
+        candidate,
+    ) -> tuple[
+        JudgmentResult | None,
+        RewardResult | None,
+        str | None,
+        str | None,
+    ]:
+        def score() -> JudgmentResult:
             result = harness.score(case.task, candidate, rubrics)
-            RewardSystem._validate_reward_result(case.task, candidate, rubrics, result)
+            RewardSystem._validate_judgment_result(
+                case.task, candidate, rubrics, result
+            )
             return result
 
-        return _attempt(
+        judgment_result, error = _attempt(
             score,
             stage_retries,
             on_retry=getattr(judge_llm, "invalidate_last", None),
         )
+        if error or judgment_result is None:
+            return None, None, "score", error
+
+        def aggregate() -> RewardResult:
+            result = harness.aggregate(
+                case.task,
+                candidate,
+                rubrics,
+                judgment_result,
+            )
+            RewardSystem._validate_reward_result(case.task, candidate, result)
+            return result
+
+        # A 阶段默认是确定性本地逻辑；失败时直接记录，不重复执行。
+        reward_result, error = _attempt(aggregate, 0)
+        if error or reward_result is None:
+            return judgment_result, None, "aggregate", error
+        return judgment_result, reward_result, None, None
 
     if score_executor is None:
         scored = [score_candidate(candidate) for candidate in case.candidates]
@@ -212,16 +240,20 @@ def evaluate_case(
         ]
         scored = [future.result() for future in futures]
 
-    for candidate, (result, error) in zip(case.candidates, scored):
-        if error or result is None:
+    for candidate, (judgment_result, reward_result, stage, error) in zip(
+        case.candidates, scored
+    ):
+        if judgment_result is not None:
+            outcome["judgment_results"].append(_jsonable(judgment_result))
+        if reward_result is not None:
+            outcome["reward_results"].append(_jsonable(reward_result))
+        if error or stage is not None:
             if outcome["error"] is None:
                 outcome["error"] = {
-                    "stage": "score",
+                    "stage": stage or "score",
                     "response_id": candidate.response_id,
                     "message": error,
                 }
-        else:
-            outcome["results"].append(_jsonable(result))
     return outcome
 
 
@@ -413,14 +445,14 @@ def run_configuration(
                         "candidates": _jsonable(case.candidates),
                         "gold": _jsonable(case.gold),
                         "rubrics": None,
-                        "results": [],
+                        "judgment_results": [],
+                        "reward_results": [],
                         "model_calls": [],
                         "usage": {"input_tokens": 0, "output_tokens": 0, "latency_ms": 0.0},
                         "error": {"stage": "evaluator", "message": f"{type(exc).__name__}: {exc}"},
                     })
                 # 每行就是一条可独立交给 Harness Optimizer 的完整轨迹。
                 row = {
-                    "trajectory_schema_version": 1,
                     "benchmark": adapter.name,
                     "harness": harness.name,
                     "run_signature": run_signature,

@@ -6,7 +6,7 @@ import json
 
 from ..reward_system import (
     Response,
-    RubricJudgment,
+    JudgmentResult,
     RewardResult,
     RewardSystem,
     Query,
@@ -96,13 +96,16 @@ class NoSkillHarness(RewardSystem):
     def get_skill_registry(self, task: Query) -> SkillRegistry:
         return SkillRegistry()
 
-    @staticmethod
     def aggregate(
-        judgments: tuple[RubricJudgment, ...],
+        self,
+        task: Query,
+        candidate: Response,
         rubrics: RubricSet,
-    ) -> float:
-        """按本 Harness 的 0～5 评分协议执行加权平均并归一化。"""
+        judgment_result: JudgmentResult,
+    ) -> RewardResult:
+        """A：按本 Harness 的 0～5 评分协议加权聚合并归一化。"""
 
+        judgments = judgment_result.judgments
         if not judgments:
             raise ValueError("cannot aggregate an empty judgment set")
         for judgment in judgments:
@@ -115,7 +118,13 @@ class NoSkillHarness(RewardSystem):
             rubric.weight * judgment_by_id[rubric.rubric_id].score
             for rubric in rubrics.rubrics
         )
-        return weighted_score / (5.0 * total_weight)
+        reward = weighted_score / (5.0 * total_weight)
+        return RewardResult(
+            query_id=task.query_id,
+            response_id=candidate.response_id,
+            reward=reward,
+            metadata={"aggregation": "weighted_mean"},
+        )
 
     def build_rubrics(self, task: Query) -> RubricSet:
         task_payload = self._task_payload(task)
@@ -136,7 +145,7 @@ class NoSkillHarness(RewardSystem):
         task: Query,
         candidate: Response,
         rubrics: RubricSet,
-    ) -> RewardResult:
+    ) -> JudgmentResult:
         task_payload = self._task_payload(task)
         rubrics_payload = self._rubrics_payload(rubrics)
         candidate_payload = self._candidate_payload(candidate)
@@ -147,15 +156,10 @@ class NoSkillHarness(RewardSystem):
         )
         raw_response = self.judge_llm(prompt)
         judgments = self._parse_judgments(raw_response, rubrics)
-        reward = self.aggregate(judgments, rubrics)
 
-        return RewardResult(
+        return JudgmentResult(
             query_id=task.query_id,
             response_id=candidate.response_id,
-            reward=reward,
             judgments=judgments,
-            metadata={
-                "aggregation": "weighted_mean",
-                "selected_skills": [],
-            },
+            metadata={"selected_skills": []},
         )

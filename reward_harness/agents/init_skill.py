@@ -6,7 +6,7 @@ import json
 
 from ..reward_system import (
     Response,
-    RubricJudgment,
+    JudgmentResult,
     RewardResult,
     RewardSystem,
     Query,
@@ -161,13 +161,16 @@ class InitSkillHarness(RewardSystem):
             )
         )
 
-    @staticmethod
     def aggregate(
-        judgments: tuple[RubricJudgment, ...],
+        self,
+        task: Query,
+        candidate: Response,
         rubrics: RubricSet,
-    ) -> float:
-        """按本 Harness 的 0～5 评分协议执行加权平均并归一化。"""
+        judgment_result: JudgmentResult,
+    ) -> RewardResult:
+        """A：按本 Harness 的 0～5 评分协议加权聚合并归一化。"""
 
+        judgments = judgment_result.judgments
         if not judgments:
             raise ValueError("cannot aggregate an empty judgment set")
         for judgment in judgments:
@@ -180,7 +183,13 @@ class InitSkillHarness(RewardSystem):
             rubric.weight * judgment_by_id[rubric.rubric_id].score
             for rubric in rubrics.rubrics
         )
-        return weighted_score / (5.0 * total_weight)
+        reward = weighted_score / (5.0 * total_weight)
+        return RewardResult(
+            query_id=task.query_id,
+            response_id=candidate.response_id,
+            reward=reward,
+            metadata={"aggregation": "weighted_mean"},
+        )
 
     def build_rubrics(self, task: Query) -> RubricSet:
         """由 Rubric Model 选择 Skill，再生成共享 RubricSet。"""
@@ -222,7 +231,7 @@ class InitSkillHarness(RewardSystem):
         task: Query,
         candidate: Response,
         rubrics: RubricSet,
-    ) -> RewardResult:
+    ) -> JudgmentResult:
         """由 Reward Model 选择 Skill，再依据共享 Rubric 为单个候选评分。"""
 
         registry = self.get_skill_registry(task)
@@ -253,15 +262,12 @@ class InitSkillHarness(RewardSystem):
         )
         raw_response = self.judge_llm(prompt)
         judgments = self._parse_judgments(raw_response, rubrics)
-        reward = self.aggregate(judgments, rubrics)
 
-        return RewardResult(
+        return JudgmentResult(
             query_id=task.query_id,
             response_id=candidate.response_id,
-            reward=reward,
             judgments=judgments,
             metadata={
-                "aggregation": "weighted_mean",
                 "selected_skills": list(skill_calls),
                 "skills": self._skills_payload(selected_skills),
             },

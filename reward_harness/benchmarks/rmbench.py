@@ -49,7 +49,7 @@ class RMBenchAdapter(BenchmarkAdapter):
         if outcome.get("error"):
             matrix = [[0.0] * 3 for _ in range(3)]
         else:
-            scores = [float(item["reward"]) for item in outcome["results"]]
+            scores = [float(item["reward"]) for item in outcome["reward_results"]]
             chosen_count = int(outcome["gold"]["chosen_count"])
             chosen, rejected = scores[:chosen_count], scores[chosen_count:]
             matrix = [[float(chosen[i] > rejected[j]) for j in range(3)] for i in range(3)]

@@ -74,7 +74,7 @@ class RewardBench2Adapter(BenchmarkAdapter):
         if outcome.get("error"):
             outcome["metric"] = contribution
             return outcome
-        scores = [float(item["reward"]) for item in outcome["results"]]
+        scores = [float(item["reward"]) for item in outcome["reward_results"]]
         num_correct = int(outcome["gold"]["num_correct"])
         if outcome["group"] == "Ties":
             contribution = self._tie_row_stats(scores, num_correct)

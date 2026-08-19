@@ -6,6 +6,7 @@ import json
 
 from ..reward_system import (
     Response,
+    JudgmentResult,
     RewardResult,
     RewardSystem,
     Query,
@@ -60,9 +61,6 @@ Requirements:
 class NoRubricHarness(RewardSystem):
     """跳过 G 阶段模型调用，直接执行单候选标量评分。"""
 
-    # 显式声明该 baseline 的合法 Rubric 数量只能为零。
-    min_rubrics = 0
-    max_rubrics = 0
     judge_prompt_template = DIRECT_SCORE_PROMPT
 
     def get_skill_registry(self, task: Query) -> SkillRegistry:
@@ -82,7 +80,7 @@ class NoRubricHarness(RewardSystem):
         task: Query,
         candidate: Response,
         rubrics: RubricSet,
-    ) -> RewardResult:
+    ) -> JudgmentResult:
         task_payload = self._task_payload(task)
         candidate_payload = self._candidate_payload(candidate)
         prompt = self.judge_prompt_template.format(
@@ -94,19 +92,41 @@ class NoRubricHarness(RewardSystem):
         raw_score = payload.get("score")
         if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
             raise ValueError("direct judge response must contain a numeric score")
-        reward = float(raw_score)
-        # RewardResult 会统一校验有限值和 [0, 1] 范围。
+        direct_score = float(raw_score)
         reason = payload.get("reason", "")
         if reason is not None and not isinstance(reason, str):
             raise ValueError("direct judge reason must be a string when provided")
 
+        return JudgmentResult(
+            query_id=task.query_id,
+            response_id=candidate.response_id,
+            judgments=(),
+            metadata={
+                "direct_score": direct_score,
+                "reason": reason or "",
+            },
+        )
+
+    def aggregate(
+        self,
+        task: Query,
+        candidate: Response,
+        rubrics: RubricSet,
+        judgment_result: JudgmentResult,
+    ) -> RewardResult:
+        """A：把 Judge 已给出的直接标量作为最终 reward。"""
+
+        direct_score = judgment_result.metadata.get("direct_score")
+        if isinstance(direct_score, bool) or not isinstance(
+            direct_score, (int, float)
+        ):
+            raise ValueError("no_rubric JudgmentResult is missing direct_score")
         return RewardResult(
             query_id=task.query_id,
             response_id=candidate.response_id,
-            reward=reward,
-            judgments=(),
+            reward=float(direct_score),
             metadata={
                 "aggregation": "direct_scalar",
-                "reason": reason or "",
+                "reason": str(judgment_result.metadata.get("reason", "")),
             },
         )

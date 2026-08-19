@@ -2,6 +2,7 @@
 
 from .reward_system import (
     Response,
+    JudgmentResult,
     RubricJudgment,
     LLMCallable,
     RewardResult,
@@ -15,6 +16,7 @@ from .reward_system import (
 
 __all__ = [
     "Response",
+    "JudgmentResult",
     "RubricJudgment",
     "LLMCallable",
     "RewardResult",

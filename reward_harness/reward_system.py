@@ -123,7 +123,7 @@ def _extract_json_object(text: str) -> dict[str, Any]:
 class Query:
     """公开任务信息。
 
-    Rubric Model 在 G 阶段只能看到该对象，不能看到候选回答或真实偏好。
+    Rubric Model 在 G 阶段可以同时看到该对象和匿名 Responses，但看不到真实偏好。
     """
 
     query_id: str  # benchmark 内稳定且唯一的任务标识
@@ -376,6 +376,7 @@ class RewardSystem(ABC):
         fixed_methods = {
             "_task_payload",
             "_candidate_payload",
+            "_responses_payload",
             "_rubrics_payload",
             "_skills_payload",
             "_parse_skill_calls",
@@ -414,8 +415,12 @@ class RewardSystem(ABC):
         """候选接口 1：返回 workflow Skill；不使用 Skill 时返回空 Registry。"""
 
     @abstractmethod
-    def build_rubrics(self, task: Query) -> RubricSet:
-        """候选接口 2：只根据公开任务生成共享 Rubric。"""
+    def build_rubrics(
+        self,
+        task: Query,
+        responses: tuple[Response, ...],
+    ) -> RubricSet:
+        """候选接口 2（G）：根据 Query 和匿名 Responses 生成共享 Rubric。"""
 
     @abstractmethod
     def score(
@@ -459,6 +464,15 @@ class RewardSystem(ABC):
         """只暴露当前回答内容，避免候选 ID 或 evaluator metadata 泄露。"""
 
         return {"content": candidate.content}
+
+    @staticmethod
+    @final
+    def _responses_payload(
+        responses: tuple[Response, ...],
+    ) -> list[dict[str, JSONValue]]:
+        """向 G 阶段暴露全部回答正文，但不暴露 ID、metadata、原始位置或 gold。"""
+
+        return [{"content": response.content} for response in responses]
 
     @staticmethod
     @final

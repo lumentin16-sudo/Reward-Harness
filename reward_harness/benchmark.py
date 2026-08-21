@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import re
@@ -18,7 +19,13 @@ from .agent_loader import DEFAULT_AGENTS_DIR, HarnessSpec, discover_harnesses
 from .benchmarks import ADAPTERS, BenchmarkAdapter, BenchmarkCase
 from .benchmarks.base import DEFAULT_DATA_ROOT
 from .model_client import RecordingLLM, VLLMBackend
-from .reward_system import JudgmentResult, RewardResult, RewardSystem, RubricSet
+from .reward_system import (
+    JudgmentResult,
+    Response,
+    RewardResult,
+    RewardSystem,
+    RubricSet,
+)
 
 
 def _jsonable(value: Any) -> Any:
@@ -108,9 +115,10 @@ def evaluate_case(
         "reward_results": [],
         "error": None,
     }
+    rubric_responses = _rubric_generation_responses(case)
 
     def build() -> RubricSet:
-        rubrics = harness.build_rubrics(case.task)
+        rubrics = harness.build_rubrics(case.task, rubric_responses)
         # 显式调用基类校验器，候选实现无法通过覆盖方法绕过 evaluator。
         RewardSystem._validate_rubric_set(harness, case.task, rubrics)
         return rubrics
@@ -229,6 +237,21 @@ def _sample_cases(
     if sample_size <= 0 or sample_size >= len(cases):
         return cases
     return random.Random(seed).sample(cases, sample_size)
+
+
+def _rubric_generation_responses(case: BenchmarkCase) -> tuple[Response, ...]:
+    """移除候选身份并按内容稳定重排，避免原始顺序泄漏 preference label。"""
+
+    ordered = sorted(
+        case.candidates,
+        key=lambda response: hashlib.sha256(
+            (case.case_id + "\0" + response.content).encode("utf-8")
+        ).hexdigest(),
+    )
+    return tuple(
+        Response(response_id=f"anonymous_{index:03d}", content=response.content)
+        for index, response in enumerate(ordered)
+    )
 
 
 def _run_one_case(

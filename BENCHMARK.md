@@ -108,7 +108,9 @@ results/{run_tag}/{benchmark}/{harness}/{model}/
 - `summary.json`：数据集指标、错误数量、token/延迟汇总和轨迹文件路径。
 - `config.json`：脱敏模型配置、agent 文件及 SHA-256、数据目录和结果路径。
 
-Runner 会先为一题生成一次共享 RubricSet，再并行执行每个 Response 的 `score()`，
+Runner 会先移除 Response ID/metadata，并按内容稳定重排全部回答，再将这组匿名
+Responses 交给 `build_rubrics()` 生成一次共享 RubricSet；随后并行执行每个原始
+Response 的 `score()`，
 随后分别调用对应 Harness 的 `aggregate()`；
 当前 `no_skill` 和 `init_skill` 会对每条 Rubric 单独调用 Judge，输出 0/1 Judgment，
 再按权重计算通过率；

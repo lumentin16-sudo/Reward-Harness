@@ -180,7 +180,7 @@ bash run_rmbench_vllm.sh
 
 ### `no_skill`
 
-先根据当前任务生成原子、具体、可二值判断的 task-specific Rubric。评分时每条 Rubric 独立调用一次 Judge，只输出 0（FAIL）或 1（PASS）；A 阶段按 Rubric 权重计算加权通过率。它不执行 Skill 选择。
+先根据 Query 和匿名、无标签、稳定重排的完整 Responses 生成具有区分度且可二值判断的共享 Rubric。评分时每条 Rubric 独立调用一次 Judge，只输出 0（FAIL）或 1（PASS）；A 阶段按 Rubric 权重计算加权通过率。它不执行 Skill 选择。
 
 ### `init_skill`
 
@@ -197,7 +197,11 @@ class MyHarness(RewardSystem):
     def get_skill_registry(self, task: Query) -> SkillRegistry:
         ...
 
-    def build_rubrics(self, task: Query) -> RubricSet:
+    def build_rubrics(
+        self,
+        task: Query,
+        responses: tuple[Response, ...],
+    ) -> RubricSet:
         ...
 
     def score(
@@ -220,7 +224,7 @@ class MyHarness(RewardSystem):
 
 `score()` 只负责 J 阶段并返回 `JudgmentResult`；`aggregate()` 负责 A 阶段，把 Judgment 聚合成 `RewardResult`。Harness 可以使用 0～5 加权平均、0～10 平均、最低项或硬约束策略。公共协议只要求每条 Rubric 恰好有一项 Judgment，并且最终 `RewardResult.reward` 归一化到 `[0,1]`。
 
-Benchmark runner 直接编排这四个接口：每条 Query 调用一次 `build_rubrics()`，再用同一个 `RubricSet` 为每个 Response 执行 `score()` 和 `aggregate()`。这样 runner 可以分别记录 G/J/A、分阶段校验错误，并统一处理并发、重试、完整轨迹和中断续跑。
+Benchmark runner 直接编排这四个接口：每条 Query 先将全部 Responses 移除 ID/metadata 并按内容稳定重排，再调用一次 `build_rubrics(query, responses)`；随后用同一个 `RubricSet` 为每个原始 Response 执行 `score()` 和 `aggregate()`。这样 G 可以发现候选间的实质差异，但无法利用原始位置或 gold，J 仍保持单 Response、单 Rubric 评分。
 
 把新的实现保存为 `reward_harness/agents/my_harness.py` 后，runner 会自动发现其中的 `RewardSystem` 子类。文件名 `my_harness` 就是 `--agents my_harness` 使用的名称。`__init__.py` 和以下划线开头的文件不会被扫描。
 

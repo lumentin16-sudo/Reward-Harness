@@ -17,15 +17,21 @@ from ..reward_system import (
 
 RUBRIC_GENERATION_PROMPT = """You are an expert evaluation-rubric designer.
 
-Generate task-specific evaluation rubrics using only the public task. Response
-answers and preference labels are intentionally unavailable; do not infer them.
+Generate one shared set of task-specific evaluation rubrics from the public
+query and an anonymized, unlabeled response set. Preference labels are
+intentionally unavailable; do not infer them from response order.
 
 [Public Task]
 {task_json}
 
+[Anonymized Response Set]
+{responses_json}
+
 Requirements:
 - First infer the task's core intent, explicit constraints, and necessary
   implicit quality standards.
+- Compare the responses only to discover substantive quality differences and
+  common omissions. The response order is arbitrary and carries no meaning.
 - Return 2 to 6 task-specific, non-overlapping rubrics that jointly cover the
   critical requirements. Avoid generic criteria unless the task requires them.
 - Each rubric must be one atomic, binary-verifiable requirement observable from
@@ -35,6 +41,11 @@ Requirements:
   "correct", "clear", "helpful", or "high quality" without an explicit test.
 - A response receives PASS only when it fully satisfies the stated condition;
   partial satisfaction must be scored FAIL.
+- Every rubric must remain independently applicable to any single response.
+  Never mention response positions, identifiers, comparisons, winners, or the
+  observed response set in the criterion.
+- Cover indispensable query requirements even when every observed response
+  misses them. Ignore incidental wording, verbosity, and formatting differences.
 - Give explicit/core requirements more weight than optional qualitative nuance.
 - weight must be between 0.5 and 2.0 and represent relative importance.
 - Do not invent formatting constraints or candidate-specific requirements.
@@ -126,10 +137,19 @@ class NoSkillHarness(RewardSystem):
             metadata={"aggregation": "weighted_binary_mean"},
         )
 
-    def build_rubrics(self, task: Query) -> RubricSet:
+    def build_rubrics(
+        self,
+        task: Query,
+        responses: tuple[Response, ...],
+    ) -> RubricSet:
         task_payload = self._task_payload(task)
         prompt = self.rubric_prompt_template.format(
-            task_json=json.dumps(task_payload, ensure_ascii=False, indent=2)
+            task_json=json.dumps(task_payload, ensure_ascii=False, indent=2),
+            responses_json=json.dumps(
+                self._responses_payload(responses),
+                ensure_ascii=False,
+                indent=2,
+            ),
         )
         raw_response = self.rubric_llm(prompt)
         rubrics = self._parse_rubrics(raw_response)

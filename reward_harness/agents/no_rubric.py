@@ -66,7 +66,11 @@ class NoRubricHarness(RewardSystem):
     def get_skill_registry(self, task: Query) -> SkillRegistry:
         return SkillRegistry()
 
-    def build_rubrics(self, task: Query) -> RubricSet:
+    def build_rubrics(
+        self,
+        task: Query,
+        responses: tuple[Response, ...],
+    ) -> RubricSet:
         """保留统一接口，但不调用 Rubric Model。"""
 
         return RubricSet(

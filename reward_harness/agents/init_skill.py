@@ -21,6 +21,9 @@ RUBRIC_SKILL_SELECTION_PROMPT = """Select skills for rubric generation.
 [Public Task]
 {task_json}
 
+[Anonymized Response Set]
+{responses_json}
+
 [Available Skills]
 {skill_catalog_json}
 
@@ -31,23 +34,34 @@ Select zero or more useful skills. Return JSON only:
 
 RUBRIC_GENERATION_PROMPT = """You are a rubric-generation model.
 
-Generate task-specific evaluation rubrics using only the public task and the
-selected workflow skills. Response answers are intentionally unavailable.
+Generate one shared set of task-specific evaluation rubrics from the public
+query, the anonymized unlabeled response set, and the selected workflow skills.
+Preference labels are unavailable; response order is arbitrary.
 
 [Public Task]
 {task_json}
+
+[Anonymized Response Set]
+{responses_json}
 
 [Selected Workflow Skills]
 {skills_json}
 
 Requirements:
 - Return 2 to 6 non-overlapping rubrics.
+- Compare the responses only to discover substantive quality differences and
+  common omissions; never infer preference from their order.
 - Each rubric must be one atomic, binary-verifiable requirement observable from
   a single response and answerable only as PASS or FAIL.
 - Make the pass condition concrete and self-contained. State the required fact,
   reasoning step, constraint, or behavior; avoid vague criteria such as
   "correct", "clear", or "high quality" without an explicit test.
 - PASS requires full satisfaction of the condition; partial satisfaction is FAIL.
+- Every rubric must remain independently applicable to any single response.
+  Never mention response positions, identifiers, comparisons, winners, or the
+  observed response set in the criterion.
+- Cover indispensable query requirements even when all observed responses miss
+  them, and ignore incidental wording, verbosity, or formatting differences.
 - weight must be a positive number representing the rubric's relative importance.
 - Do not include candidate-specific wording or predicted answers.
 - Return JSON only, with this schema:
@@ -200,13 +214,21 @@ class InitSkillHarness(RewardSystem):
             metadata={"aggregation": "weighted_binary_mean"},
         )
 
-    def build_rubrics(self, task: Query) -> RubricSet:
+    def build_rubrics(
+        self,
+        task: Query,
+        responses: tuple[Response, ...],
+    ) -> RubricSet:
         """由 Rubric Model 选择 Skill，再生成共享 RubricSet。"""
 
         registry = self.get_skill_registry(task).for_stage("G")
         task_payload = self._task_payload(task)
+        responses_payload = self._responses_payload(responses)
         selection_prompt = self.rubric_skill_selection_prompt.format(
             task_json=json.dumps(task_payload, ensure_ascii=False, indent=2),
+            responses_json=json.dumps(
+                responses_payload, ensure_ascii=False, indent=2
+            ),
             skill_catalog_json=json.dumps(
                 registry.catalog, ensure_ascii=False, indent=2
             ),
@@ -217,6 +239,9 @@ class InitSkillHarness(RewardSystem):
 
         prompt = self.rubric_prompt_template.format(
             task_json=json.dumps(task_payload, ensure_ascii=False, indent=2),
+            responses_json=json.dumps(
+                responses_payload, ensure_ascii=False, indent=2
+            ),
             skills_json=json.dumps(
                 self._skills_payload(selected_skills),
                 ensure_ascii=False,

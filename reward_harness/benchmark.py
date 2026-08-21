@@ -58,6 +58,7 @@ def _usable_summary(
     path: Path,
     *,
     expected_cases: int,
+    expected_repetitions: int,
 ) -> dict[str, Any] | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -67,6 +68,7 @@ def _usable_summary(
         isinstance(value, dict)
         and value.get("status") == "complete"
         and value.get("num_cases") == expected_cases
+        and value.get("average_n", 1) == expected_repetitions
     ):
         return value
     return None
@@ -254,16 +256,72 @@ def _rubric_generation_responses(case: BenchmarkCase) -> tuple[Response, ...]:
     )
 
 
+def _mean_summary_values(values: list[Any]) -> Any:
+    """递归平均多轮 summary 中同构的数值指标。"""
+
+    if values and all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in values
+    ):
+        return sum(float(value) for value in values) / len(values)
+    if values and all(isinstance(value, dict) for value in values):
+        first = values[0]
+        return {
+            key: _mean_summary_values([value[key] for value in values])
+            for key in first
+            if all(key in value for value in values)
+        }
+    return values[0] if values else None
+
+
+def _summarize_repetitions(
+    adapter: BenchmarkAdapter,
+    outcomes: list[dict[str, Any]],
+    average_n: int,
+) -> dict[str, Any]:
+    """每轮独立计算官方指标，再对 N 轮指标做算术平均。"""
+
+    repetitions = []
+    for repeat_index in range(average_n):
+        rows = [
+            row
+            for row in outcomes
+            if int(row.get("repeat_index", 0)) == repeat_index
+        ]
+        repetitions.append(
+            {"repeat_index": repeat_index, **adapter.summarize(rows)}
+        )
+
+    averaged = _mean_summary_values(
+        [
+            {key: value for key, value in summary.items() if key != "repeat_index"}
+            for summary in repetitions
+        ]
+    )
+    if not isinstance(averaged, dict):
+        raise TypeError("benchmark adapter summary must be a dictionary")
+    averaged["average_n"] = average_n
+    averaged["repetitions"] = repetitions
+    averaged["num_cases"] = len(
+        {str(row["case_id"]) for row in outcomes}
+    )
+    averaged["num_evaluations"] = len(outcomes)
+    averaged["num_errors"] = sum(bool(row.get("error")) for row in outcomes)
+    return averaged
+
+
 def _run_one_case(
     case: BenchmarkCase,
     adapter: BenchmarkAdapter,
     harness_type: type[RewardSystem],
     backend: VLLMBackend,
+    repeat_index: int,
+    use_cache: bool,
     stage_retries: int,
     score_executor: Executor | None = None,
 ) -> dict[str, Any]:
-    rubric = backend.recorder("rubric")
-    judge = backend.recorder("judge")
+    rubric = backend.recorder("rubric", use_cache=use_cache)
+    judge = backend.recorder("judge", use_cache=use_cache)
     outcome = evaluate_case(
         case,
         harness_type,
@@ -272,6 +330,7 @@ def _run_one_case(
         stage_retries=stage_retries,
         score_executor=score_executor,
     )
+    outcome["repeat_index"] = repeat_index
     outcome["model_calls"] = [record.to_dict() for record in (*rubric.records, *judge.records)]
     outcome["usage"] = {
         "input_tokens": sum(record.input_tokens for record in (*rubric.records, *judge.records)),
@@ -290,6 +349,7 @@ def run_configuration(
     run_root: Path,
     workers: int,
     force: bool,
+    average_n: int,
     stage_retries: int,
     smoke_per_group: int,
     seed: int,
@@ -308,6 +368,7 @@ def run_configuration(
         completed_summary = _usable_summary(
             summary_path,
             expected_cases=len(cases),
+            expected_repetitions=average_n,
         )
         if completed_summary is not None:
             print(
@@ -321,17 +382,31 @@ def run_configuration(
     trajectories_path = run_directory / "trajectories.jsonl"
     raw_existing = [] if force else _read_jsonl(trajectories_path)
     target_ids = {case.case_id for case in cases}
-    # 同一个 case 若因历史中断留下重复行，以最后一条完整记录为准。
-    existing_by_id = {
-        str(row["case_id"]): row
-        for row in raw_existing
-        if str(row.get("case_id")) in target_ids
+    target_keys = {
+        (repeat_index, case.case_id)
+        for repeat_index in range(average_n)
+        for case in cases
     }
-    existing = list(existing_by_id.values())
+    # 同一轮的同一个 case 若留下重复行，以最后一条完整记录为准。
+    existing_by_key = {
+        (int(row.get("repeat_index", 0)), str(row["case_id"])): row
+        for row in raw_existing
+        if (
+            str(row.get("case_id")) in target_ids
+            and (int(row.get("repeat_index", 0)), str(row.get("case_id")))
+            in target_keys
+        )
+    }
+    existing = list(existing_by_key.values())
     if force or not trajectories_path.exists():
         trajectories_path.write_text("", encoding="utf-8")
-    completed = set(existing_by_id)
-    pending = [case for case in cases if case.case_id not in completed]
+    completed = set(existing_by_key)
+    pending = [
+        (repeat_index, case)
+        for repeat_index in range(average_n)
+        for case in cases
+        if (repeat_index, case.case_id) not in completed
+    ]
 
     config = {
         "status": "running",
@@ -349,6 +424,7 @@ def run_configuration(
         "enable_thinking": False,
         "request_retries": backend.request_retries,
         "stage_retries": stage_retries,
+        "average_n": average_n,
         "workers": workers,
         "request_workers": request_workers,
         "prompt_cache": (
@@ -376,18 +452,25 @@ def run_configuration(
                     adapter,
                     harness.harness_type,
                     backend,
+                    repeat_index,
+                    average_n == 1,
                     stage_retries,
                     score_executor,
-                ): case.case_id
-                for case in pending
+                ): (repeat_index, case.case_id)
+                for repeat_index, case in pending
             }
             for future in as_completed(futures):
-                case_id = futures[future]
+                repeat_index, case_id = futures[future]
                 try:
                     row = future.result()
                 except Exception as exc:  # evaluator 自身异常也不得终止其余样本。
-                    case = next(item for item in pending if item.case_id == case_id)
+                    case = next(
+                        item
+                        for index, item in pending
+                        if index == repeat_index and item.case_id == case_id
+                    )
                     row = adapter.score_outcome({
+                        "repeat_index": repeat_index,
                         "case_id": case_id,
                         "group": case.group,
                         "query": _jsonable(case.task),
@@ -419,11 +502,13 @@ def run_configuration(
                     else:
                         message = f" | {str(error)[:300]}"
                 print(
-                    f"[{adapter.name}/{harness.name}] {status} {case_id}{message}",
+                    f"[{adapter.name}/{harness.name}] "
+                    f"repeat={repeat_index + 1}/{average_n} "
+                    f"{status} {case_id}{message}",
                     flush=True,
                 )
 
-    summary = adapter.summarize(existing)
+    summary = _summarize_repetitions(adapter, existing, average_n)
     summary["agent"] = harness.name
     summary["status"] = "complete"
     summary["trajectory_path"] = str(trajectories_path.resolve())
@@ -459,6 +544,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-workers", type=int, default=16)
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--model", default="Qwen/Qwen3-8B")
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--average-n",
+        type=int,
+        default=1,
+        help=(
+            "Run the complete benchmark N independent times (G, J and A), then "
+            "average the N benchmark metrics."
+        ),
+    )
     parser.add_argument("--smoke-per-group", type=int, default=2)
     parser.add_argument(
         "--sample-size",
@@ -498,15 +593,24 @@ def main(argv: list[str] | None = None) -> int:
     if (
         args.workers < 1
         or args.request_workers < 1
+        or args.average_n < 1
+        or args.temperature < 0
         or args.smoke_per_group < 0
         or args.sample_size < 0
         or args.stage_retries < 0
     ):
         raise SystemExit(
-            "workers and request-workers must be >= 1; "
+            "workers, request-workers and average-n must be >= 1; "
+            "temperature must be >= 0; "
             "smoke-per-group, sample-size and stage-retries must be >= 0"
         )
-
+    if args.average_n > 1 and args.temperature == 0:
+        print(
+            "Warning: Average@N repeats complete evaluations, but "
+            "temperature=0 may make the independent runs identical.",
+            file=sys.stderr,
+            flush=True,
+        )
     try:
         discovered = discover_harnesses(args.agents_dir)
     except (FileNotFoundError, ImportError, TypeError, ValueError) as exc:
@@ -566,6 +670,7 @@ def main(argv: list[str] | None = None) -> int:
             if _usable_summary(
                 run_directory / "summary.json",
                 expected_cases=len(cases),
+                expected_repetitions=args.average_n,
             ) is None:
                 incomplete_jobs.append((adapter, cases, harness))
             else:
@@ -581,6 +686,7 @@ def main(argv: list[str] | None = None) -> int:
     backend = VLLMBackend(
         base_url=base_url,
         model=args.model,
+        temperature=args.temperature,
         request_workers=args.request_workers,
         cache_dir=run_root / ".llm_cache",
     )
@@ -608,6 +714,7 @@ def main(argv: list[str] | None = None) -> int:
             run_root=run_root,
             workers=args.workers,
             force=args.force,
+            average_n=args.average_n,
             stage_retries=args.stage_retries,
             smoke_per_group=args.smoke_per_group,
             seed=args.seed,

@@ -276,8 +276,8 @@ results/{run_tag}/{benchmark}/{harness}/{model}/
 └── summary.json
 ```
 
-- `trajectories.jsonl`：唯一的完整轨迹文件。每行独立保存 Query、Responses、evaluator-only gold、Harness metadata、Rubrics、JudgmentResults、RewardResults、完整模型请求响应、token、延迟、错误和 benchmark 单题结果。Average@N 时用 `repeat_index` 标记所属轮次。
-- `summary.json`：顶层保存 N 轮 benchmark 指标的平均值，`repetitions` 保存每一轮的独立指标，同时记录错误数、token/延迟统计和轨迹文件位置。
+- `trajectories.jsonl`：唯一的完整轨迹文件。每行独立保存 Query、Responses、evaluator-only gold、Harness metadata、Rubrics、JudgmentResults、RewardResults、完整模型请求响应、token、延迟、错误和 benchmark 单题结果。多次 trial 时用 `trial_index` 标记所属轮次。
+- `summary.json`：顶层保存 Average@N 指标，`trials` 保存每一轮的独立指标，`voting_at_n` 保存各轮最高分回答投票后的 benchmark 指标，同时记录错误数、token/延迟统计和轨迹文件位置。
 - `config.json`：脱敏后的模型配置、数据配置、Agent 文件及源码 SHA-256。
 
 成功的模型响应还会缓存在：
@@ -289,7 +289,7 @@ results/{run_tag}/.llm_cache/
 Runner 在同一个时间 tag 内自动续跑：
 
 - 如果当前 tag 下已有完整 `summary.json`，直接跳过；
-- 如果只存在部分 `trajectories.jsonl`，从未完成的 `(repeat_index, case_id)` 继续；
+- 如果只存在部分 `trajectories.jsonl`，从未完成的 `(trial_index, case_id)` 继续；
 - 默认 tag 是启动时的本地时间 `YYYYMMDD_HHMMSS`；
 - 中断后使用同一个 `--run-tag` 才会继续原目录；
 - 修改 Agent、数据、模型或抽样配置时应使用新的 tag；
@@ -308,7 +308,7 @@ API 请求或 JSON/schema 解析在重试后仍失败时，该 case 会记录 `e
 --smoke-per-group  每组抽样数，默认 2；0 表示全量
 --sample-size      全局随机抽样数，默认 0，即不额外抽样
 --stage-retries    Rubric/Judge 等阶段失败后的重试次数，默认 2
---average-n        完整独立运行整套评测 N 次并平均各轮 benchmark 指标，默认 1
+--trial-num        完整独立运行整套评测 N 次，同时计算 Average@N 和 Voting@N，默认 1
 --temperature      模型采样温度；Average@N > 1 时建议使用正数
 --base-url         vLLM OpenAI-compatible API 地址
 --model            服务端模型名，默认 Qwen/Qwen3-8B

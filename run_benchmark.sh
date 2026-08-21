@@ -16,7 +16,7 @@ RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 #   --sample-size       从加载后的全部 case 中随机抽取 N 条；0 表示不额外抽样。
 #   --seed              抽样随机种子。
 #   --stage-retries     Rubric/Judge 阶段失败后的重试次数。
-#   --average-n         完整独立运行 G→J→A 和整套 benchmark N 次，再平均 N 轮指标；默认 1。
+#   --trial-num         完整独立运行整套 benchmark N 次，同时计算 Average@N 和 Voting@N；默认 1。
 #   --temperature       模型采样温度；Average@N > 1 时建议设为正数以产生独立采样。
 #   --data-dir          标准化 benchmark 数据目录，默认 data/。
 #   --output-dir        时间目录的父目录，默认 results/。
@@ -31,7 +31,7 @@ python -u -m reward_harness.benchmark \
   --workers 16 \
   --request-workers 64 \
   --smoke-per-group 0 \
-  --average-n 1 \
+  --trial-num 1 \
   --seed 42 \
   --output-dir results \
   --run-tag "$RUN_TAG"

@@ -77,13 +77,31 @@ class RMBenchAdapter(BenchmarkAdapter):
                 key: mean(float(row.get("metric", {}).get(key, 0.0)) for row in rows) if rows else 0.0
                 for key in ("hard", "normal", "easy", "average")
             }
+        beyond_rubric = mean(domains[domain]["average"] for domain in domains)
+        domain_counts = {
+            domain: len(by_domain.get(domain, [])) for domain in domains
+        }
+        total_count = sum(domain_counts.values())
+        auto_rubric = (
+            sum(
+                domains[domain]["average"] * domain_counts[domain]
+                for domain in domains
+            )
+            / total_count
+            if total_count
+            else 0.0
+        )
         return {
+            # beyond_rubric：四个 domain 的 3×3 平均准确率做宏平均。
+            "beyond_rubric": beyond_rubric,
+            # auto_rubric：四个 domain 的 3×3 平均准确率按样本数加权。
+            "auto_rubric": auto_rubric,
             "benchmark": self.name,
             "domains": domains,
             "hard": mean(domains[d]["hard"] for d in domains),
             "normal": mean(domains[d]["normal"] for d in domains),
             "easy": mean(domains[d]["easy"] for d in domains),
-            "overall": mean(domains[d]["average"] for d in domains),
+            "overall": beyond_rubric,
             "num_cases": len(outcomes),
             "num_errors": sum(bool(row.get("error")) for row in outcomes),
         }

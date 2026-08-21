@@ -153,7 +153,31 @@ class RewardBench2Adapter(BenchmarkAdapter):
                 + 0.20 * ties_detail["correctness_preferred_hard"]
                 + 0.01 * ties_detail["margin_score"]
             )
+
+        non_ties_scores = [
+            score for subset, score in subset_scores.items() if subset != "Ties"
+        ]
+        beyond_rubric = mean(non_ties_scores) if non_ties_scores else 0.0
+        subset_counts = {
+            subset: len(rows)
+            for subset, rows in grouped.items()
+            if subset in subset_scores
+        }
+        total_count = sum(subset_counts.values())
+        auto_rubric = (
+            sum(
+                subset_scores[subset] * subset_counts[subset]
+                for subset in subset_counts
+            )
+            / total_count
+            if total_count
+            else 0.0
+        )
         return {
+            # beyond_rubric：排除 Ties 后，各 subset 等权宏平均。
+            "beyond_rubric": beyond_rubric,
+            # auto_rubric：包含 Ties，按当前评测集中各 subset 的样本数加权。
+            "auto_rubric": auto_rubric,
             "benchmark": self.name,
             "subset_scores": subset_scores,
             "ties": ties_detail,

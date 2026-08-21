@@ -109,6 +109,12 @@ results/{run_tag}/{benchmark}/{harness}/{model}/
 - `summary.json`：顶层是 Average@N 指标，`trials` 保留每轮独立指标，`voting_at_n` 保存各轮最高分回答投票后的指标，并包含错误数量、token/延迟汇总和轨迹文件路径。
 - `config.json`：脱敏模型配置、agent 文件及 SHA-256、数据目录和结果路径。
 
+每个 summary 最前面提供统一关键指标，并保留原有明细：
+
+- RewardBench：`beyond_rubric` 与 `auto_rubric` 均为 Chat、Chat Hard、Safety、Reasoning 四个 section 的宏平均；
+- RewardBench 2：`beyond_rubric` 为排除 Ties 后的 subset 宏平均，`auto_rubric` 为包含 Ties 的 subset 样本数加权平均；
+- RM-Bench：先在每个 domain 内平均 3×3 比较矩阵；`beyond_rubric` 为四个 domain 的宏平均，`auto_rubric` 为四个 domain 按样本数加权的平均。
+
 Runner 会先移除 Response ID/metadata，并按内容稳定重排全部回答，再将这组匿名
 Responses 交给 `build_rubrics()` 生成一次共享 RubricSet；随后并行执行每个原始
 Response 的 `score()`，

@@ -162,12 +162,16 @@ class RewardBenchAdapter(BenchmarkAdapter):
                 else 0.0
             )
 
+        core_average = mean(section_scores.values())
         return {
+            # 两个关键指标都采用四个官方 core section 的宏平均。
+            "beyond_rubric": core_average,
+            "auto_rubric": core_average,
             "benchmark": self.name,
             "subset_scores": subset_scores,
             "section_scores": section_scores,
             # 官方 leaderboard 还包含单独的 Prior Sets；本 adapter 只加载 core set。
-            "derived_core_overall": mean(section_scores.values()),
+            "derived_core_overall": core_average,
             "num_cases": len(outcomes),
             "num_errors": sum(bool(row.get("error")) for row in outcomes),
         }

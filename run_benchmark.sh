@@ -7,8 +7,8 @@ RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 # reward_harness.benchmark 参数说明：
 #   --base-url          vLLM 的 OpenAI-compatible API 地址。
 #   --model             vLLM 暴露的模型名称。
-#   --benchmarks        评测数据集，可选 rewardbench、rewardbench2、rmbench。
-#   --agents            指定要评测的 Agent；省略时自动评测 reward_harness/agents/ 下的全部实现。
+#   --benchmarks        winner-only test 分支当前只支持 rewardbench。
+#   --agents            可选 eval_skill_vanilla、eval_skill_rubric、eval_skill。
 #   --agents-dir        自定义 Agent 文件目录。
 #   --workers           同时处理的 benchmark case 数量。
 #   --request-workers   全局同时发送给 vLLM 的最大请求数。
@@ -18,6 +18,7 @@ RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 #   --stage-retries     Rubric/Judge 阶段失败后的重试次数。
 #   --trial-num         完整独立运行整套 benchmark N 次，同时计算 Average@N 和 Voting@N；默认 1。
 #   --temperature       模型采样温度；Average@N > 1 时建议设为正数以产生独立采样。
+#   --max-tokens        单次模型响应的最大 token 数，默认 2048。
 #   --data-dir          标准化 benchmark 数据目录，默认 data/。
 #   --output-dir        时间目录的父目录，默认 results/。
 #   --run-tag           顶层时间目录名；复用同一 tag 可断点续跑。
@@ -27,11 +28,14 @@ RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 python -u -m reward_harness.benchmark \
   --base-url "$VLLM_BASE_URL" \
   --model Qwen/Qwen3-8B \
-  --benchmarks rewardbench2 rmbench \
-  --workers 16 \
-  --request-workers 64 \
+  --benchmarks rewardbench \
+  --agents eval_skill_vanilla eval_skill_rubric eval_skill \
+  --temperature 0.7 \
+  --max-tokens 10000 \
+  --workers 32 \
+  --request-workers 32 \
   --smoke-per-group 0 \
-  --trial-num 1 \
+  --trial-num 3 \
   --seed 42 \
   --output-dir results \
   --run-tag "$RUN_TAG"

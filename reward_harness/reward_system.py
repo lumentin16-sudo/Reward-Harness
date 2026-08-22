@@ -8,9 +8,9 @@
 4. 校验 Harness 输出、Rubric 覆盖关系和最终奖励；
 5. 保持业务结果可序列化，完整执行轨迹由 benchmark runner 统一记录。
 
-候选 Harness 的搜索边界有四个公开接口：``get_skill_registry``、
-``build_rubrics``、``score`` 和 ``aggregate``。候选可以自由设计 Skill、
-Prompt、G/J/A 调用流程和奖励聚合策略，但不能修改公共 payload 协议。
+候选 Harness 的搜索边界有三个公开接口：``get_skill_registry``、
+``build_rubrics`` 和 ``judge``。Judge 一次看到完整 Responses 并直接返回唯一
+winner，不再暴露独立的逐回答评分和奖励聚合接口。
 """
 
 from __future__ import annotations
@@ -140,10 +140,9 @@ class Query:
 
 @dataclass(frozen=True, slots=True)
 class Response:
-    """单个待评分回答或可审计的 Agent 轨迹。
+    """一个待比较回答或可审计的 Agent 轨迹。
 
-    ``response_id`` 只用于结果绑定，不会通过固定 payload 暴露给 Judge，
-    从而避免模型根据 ``a`` / ``b`` 等位置标识产生偏差。
+    evaluator 会先稳定重排并替换原始 ID，再把完整匿名 Responses 交给 Judge。
     """
 
     response_id: str  # evaluator 用于绑定预测结果，不属于 Judge 输入
@@ -184,8 +183,8 @@ class Rubric:
 class RubricSet:
     """同一 Query 下由全部 Response 共享的 Rubric 集合。
 
-    Benchmark 每题只生成一次 RubricSet，并把同一个对象传给每次 ``score``，
-    防止不同 Response 因评价标准不同而失去可比性。
+    Benchmark 每题只生成一次 RubricSet，并把同一个对象交给完整 Responses 上的
+    forced-choice ``judge``。
     """
 
     query_id: str  # Rubric 所属任务
@@ -210,7 +209,7 @@ class RubricSet:
 # Workflow Skill 协议
 # ---------------------------------------------------------------------------
 
-SkillStage = Literal["G", "J", "A"]
+SkillStage = Literal["G", "J"]
 
 @dataclass(frozen=True, slots=True)
 class Skill:
@@ -223,7 +222,7 @@ class Skill:
 
     def __post_init__(self) -> None:
         _require_non_empty(self.name, "skill name")
-        if self.stage not in {"G", "J", "A"}:
+        if self.stage not in {"G", "J"}:
             raise ValueError(f"unknown skill stage: {self.stage!r}")
         _require_non_empty(self.description, "skill description")
         _require_non_empty(self.content, "skill content")
@@ -245,9 +244,9 @@ class SkillRegistry:
             raise ValueError("skill names must be unique within each stage")
 
     def for_stage(self, stage: SkillStage) -> "SkillRegistry":
-        """返回只包含指定 G/J/A 阶段 Skill 的选择池。"""
+        """返回只包含指定 G/J 阶段 Skill 的选择池。"""
 
-        if stage not in {"G", "J", "A"}:
+        if stage not in {"G", "J"}:
             raise ValueError(f"unknown skill stage: {stage!r}")
         return SkillRegistry(tuple(skill for skill in self.skills if skill.stage == stage))
 
@@ -346,6 +345,20 @@ class RewardResult:
         _json_safe(dict(self.metadata), "metadata")
 
 
+@dataclass(frozen=True, slots=True)
+class WinnerResult:
+    """J 阶段对完整 Responses 做 forced-choice 后产生的唯一 winner。"""
+
+    query_id: str
+    winner_response_id: str
+    metadata: Mapping[str, JSONValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.query_id, "query_id")
+        _require_non_empty(self.winner_response_id, "winner_response_id")
+        _json_safe(dict(self.metadata), "metadata")
+
+
 # ---------------------------------------------------------------------------
 # Reward Harness 稳定接口与公共控制流程
 # ---------------------------------------------------------------------------
@@ -356,16 +369,11 @@ class RewardSystem(ABC):
     可搜索部分：
         - ``get_skill_registry``：Skill 的内容、数量和组织方式；
         - ``build_rubrics``：Rubric Prompt、Skill 选择和 G 调用流程；
-        - ``score``：Judge Prompt、Skill 选择和 J 调用流程。
-        - ``aggregate``：原始分数校验、聚合与 A 阶段输出。
+        - ``judge``：完整 Responses 上的比较 Prompt、Skill 选择和 winner 输出。
 
     固定部分：
         - 输入 payload 与 JSON 输出协议；
-        - Rubric 覆盖、结果绑定和最终 reward 范围校验；
-        - Query、Response、Rubric 和 RewardResult 的绑定关系。
-
-    原始 Judge 分数尺度和聚合方式属于 Harness 的 ``aggregate`` 实现；所有
-    Harness 只需把最终 ``RewardResult.reward`` 归一化到 [0, 1]。
+        - Query、Responses、RubricSet 和 WinnerResult 的绑定关系。
     """
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -377,6 +385,7 @@ class RewardSystem(ABC):
             "_task_payload",
             "_candidate_payload",
             "_responses_payload",
+            "_judge_responses_payload",
             "_rubrics_payload",
             "_skills_payload",
             "_parse_skill_calls",
@@ -406,7 +415,7 @@ class RewardSystem(ABC):
 
     @property
     def judge_llm(self) -> LLMCallable:
-        """单候选评分阶段使用的冻结模型。"""
+        """完整 Responses 比较阶段使用的冻结模型。"""
 
         return self._judge_llm
 
@@ -423,23 +432,13 @@ class RewardSystem(ABC):
         """候选接口 2（G）：根据 Query 和匿名 Responses 生成共享 Rubric。"""
 
     @abstractmethod
-    def score(
+    def judge(
         self,
         task: Query,
-        candidate: Response,
+        responses: tuple[Response, ...],
         rubrics: RubricSet,
-    ) -> JudgmentResult:
-        """候选接口 3（J）：根据共享 Rubric 为当前单个 Response 评分。"""
-
-    @abstractmethod
-    def aggregate(
-        self,
-        task: Query,
-        candidate: Response,
-        rubrics: RubricSet,
-        judgment_result: JudgmentResult,
-    ) -> RewardResult:
-        """候选接口 4（A）：把 J 阶段结果聚合为 [0, 1] 最终奖励。"""
+    ) -> WinnerResult:
+        """候选接口 3（J）：比较完整 Responses 并返回唯一 winner。"""
 
     @staticmethod
     @final
@@ -473,6 +472,18 @@ class RewardSystem(ABC):
         """向 G 阶段暴露全部回答正文，但不暴露 ID、metadata、原始位置或 gold。"""
 
         return [{"content": response.content} for response in responses]
+
+    @staticmethod
+    @final
+    def _judge_responses_payload(
+        responses: tuple[Response, ...],
+    ) -> list[dict[str, JSONValue]]:
+        """给 Judge 提供匿名 Response ID 与正文，供 winner 结果精确绑定。"""
+
+        return [
+            {"response_id": response.response_id, "content": response.content}
+            for response in responses
+        ]
 
     @staticmethod
     @final
@@ -664,3 +675,17 @@ class RewardSystem(ABC):
             raise ValueError("RewardResult.query_id does not match the task")
         if result.response_id != candidate.response_id:
             raise ValueError("RewardResult.response_id does not match the response")
+
+    @staticmethod
+    def _validate_winner_result(
+        task: Query,
+        responses: tuple[Response, ...],
+        result: WinnerResult,
+    ) -> None:
+        """校验 winner 属于当前 Query 的完整匿名 Response 集合。"""
+
+        if result.query_id != task.query_id:
+            raise ValueError("WinnerResult.query_id does not match the query")
+        response_ids = {response.response_id for response in responses}
+        if result.winner_response_id not in response_ids:
+            raise ValueError("WinnerResult references an unknown response")

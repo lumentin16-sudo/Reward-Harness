@@ -128,12 +128,12 @@ class RewardBenchAdapter(BenchmarkAdapter):
     def score_outcome(self, outcome: dict[str, Any]) -> dict[str, Any]:
         score = 0.0
         if not outcome.get("error"):
-            rewards = [
-                float(item["reward"]) for item in outcome["reward_results"]
-            ]
-            if len(rewards) == 2:
-                # RewardBench 官方使用严格大于；相等按错误处理。
-                score = float(rewards[0] > rewards[1])
+            winner = outcome.get("winner_result")
+            if isinstance(winner, dict):
+                # candidate_000 是 evaluator-only chosen；Judge 只见随机匿名位置。
+                score = float(
+                    winner.get("winner_response_id") == "candidate_000"
+                )
         outcome["metric"] = {"score": score}
         return outcome
 

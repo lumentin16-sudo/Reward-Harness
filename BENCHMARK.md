@@ -58,30 +58,32 @@ python -m reward_harness.benchmark \
 完整评测需要显式传入 `--smoke-per-group 0`。无需再传 `--resume`，续跑和完整结果跳过
 均已自动启用。
 
-默认会自动扫描 `reward_harness/agents/*.py`。每个文件需要定义一个
-`RewardSystem` 子类，文件名就是 agent 名称；`__init__.py` 和以下划线开头的文件会忽略。
-使用 `--agents no_skill` 可以只评测指定 agent；旧的 `--harnesses` 仍作为兼容别名保留。
+test 分支使用 winner-only 协议，当前只支持 RewardBench 的两个候选。可选择三个具体 Harness：
+`eval_skill_vanilla`、`eval_skill_rubric` 和 `eval_skill`。它们分别使用用户提供的 Eval-Skill
+`evaluation.py` 中 vanilla、rubric 和 skill pairwise Prompt，并直接输出唯一 winner。
 
-无 Rubric 的直接标量 baseline 位于 `reward_harness/agents/no_rubric.py`。它的 `build_rubrics()`
-返回空集合且不调用模型，随后对每个候选调用一次 Judge，直接解析 0～1 reward：
+复现实验调用参数可使用：
 
 ```bash
 python -m reward_harness.benchmark \
-  --benchmarks rewardbench rewardbench2 rmbench \
-  --agents no_rubric \
+  --benchmarks rewardbench \
+  --agents eval_skill_vanilla eval_skill_rubric eval_skill \
+  --model Qwen/Qwen3-8B \
+  --temperature 0.7 \
+  --trial-num 3 \
+  --max-tokens 10000 \
+  --workers 32 \
+  --request-workers 32 \
   --smoke-per-group 0
 ```
 
-Baseline 提示词吸收了 Eval-Skill 的核心意图分析与去位置偏差、AdaRubrics 的
-task-specific/observable/orthogonal/calibrated rubric 原则，以及 OpenJudge 的严格结构化
-pointwise 输出。没有移植会同时展示多个候选的 pairwise/listwise 提示词，也没有在测试题上
-执行依赖 gold label 的 rubric 修订流程，以保持候选隔离和 benchmark 可信性。
+Runner 当前统一关闭 Qwen3 thinking；请求重试、并发和结果落盘仍由外部 evaluator 管理。
 
 常用参数：
 
 ```text
---benchmarks rewardbench rewardbench2 rmbench
---agents no_skill init_skill
+--benchmarks rewardbench
+--agents eval_skill_vanilla eval_skill_rubric eval_skill
 --workers 4
 --request-workers 16
 --trial-num 1
@@ -104,7 +106,7 @@ results/{run_tag}/{benchmark}/{harness}/{model}/
 ```
 
 - `trajectories.jsonl`：唯一的完整轨迹文件。每行独立包含 Query、Responses、
-  evaluator-only gold、Harness metadata、Rubrics、JudgmentResults、RewardResults、完整模型请求响应、
+  evaluator-only gold、Harness metadata、Rubrics、WinnerResult、完整模型请求响应、
   token、延迟、错误及 benchmark 单题结果；多次 trial 时额外包含 `trial_index`。
 - `summary.json`：顶层是 Average@N 指标，`trials` 保留每轮独立指标，`voting_at_n` 保存各轮最高分回答投票后的指标，并包含错误数量、token/延迟汇总和轨迹文件路径。
 - `config.json`：脱敏模型配置、agent 文件及 SHA-256、数据目录和结果路径。
@@ -115,12 +117,9 @@ results/{run_tag}/{benchmark}/{harness}/{model}/
 - RewardBench 2：`beyond_rubric` 为排除 Ties 后的 subset 宏平均，`auto_rubric` 为包含 Ties 的 subset 样本数加权平均；
 - RM-Bench：先在每个 domain 内平均 3×3 比较矩阵；`beyond_rubric` 为四个 domain 的宏平均，`auto_rubric` 为四个 domain 按样本数加权的平均。
 
-Runner 会先移除 Response ID/metadata，并按内容稳定重排全部回答，再将这组匿名
-Responses 交给 `build_rubrics()` 生成一次共享 RubricSet；随后并行执行每个原始
-Response 的 `score()`，
-随后分别调用对应 Harness 的 `aggregate()`；
-当前 `no_skill` 和 `init_skill` 会对每条 Rubric 单独调用 Judge，输出 0/1 Judgment，
-再按权重计算通过率；
+Runner 会先移除原始 Response ID/metadata，并按内容稳定重排全部回答，再将同一组匿名
+Responses 交给 `build_rubrics()` 和 `judge()`。Judge 一次看到完整 A/B 并返回唯一
+`WinnerResult`；evaluator 随后映射回原始 ID，gold 从不进入模型 Prompt。
 所有 rubric/judge 请求共同受 `--request-workers` 限流。成功响应按 Prompt 哈希
 缓存在 `results/{run_tag}/.llm_cache/`，断点后可以复用；`trial-num` 大于 1 时关闭 Rubric/Judge 缓存，保证每轮真正重新请求。JSON 解析或接口校验失败时，
 只清除当前线程对应的坏缓存并重新请求。

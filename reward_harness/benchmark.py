@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import random
 import re
 import sys
 import time
-from concurrent.futures import Executor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,13 +20,7 @@ from .agent_loader import DEFAULT_AGENTS_DIR, HarnessSpec, discover_harnesses
 from .benchmarks import ADAPTERS, BenchmarkAdapter, BenchmarkCase
 from .benchmarks.base import DEFAULT_DATA_ROOT
 from .model_client import RecordingLLM, VLLMBackend
-from .reward_system import (
-    JudgmentResult,
-    Response,
-    RewardResult,
-    RewardSystem,
-    RubricSet,
-)
+from .reward_system import Response, RewardSystem, RubricSet, WinnerResult
 
 
 def _jsonable(value: Any) -> Any:
@@ -70,6 +65,7 @@ def _usable_summary(
         and value.get("num_cases") == expected_cases
         and value.get("trial_num", 1) == expected_trials
         and isinstance(value.get("voting_at_n"), dict)
+        and value.get("result_protocol") == "winner"
     ):
         return value
     return None
@@ -102,9 +98,8 @@ def evaluate_case(
     judge_llm: Callable[[str], str],
     *,
     stage_retries: int = 2,
-    score_executor: Executor | None = None,
 ) -> dict[str, Any]:
-    """可信 evaluator：一题一次 Rubric，并行候选复用同一 RubricSet。"""
+    """可信 evaluator：完整匿名 Responses 上一次 G、一次 forced-choice J。"""
 
     harness = harness_type(rubric_llm, judge_llm)
     outcome: dict[str, Any] = {
@@ -114,14 +109,13 @@ def evaluate_case(
         "responses": _jsonable(case.candidates),
         "gold": _jsonable(case.gold),
         "rubrics": None,
-        "judgment_results": [],
-        "reward_results": [],
+        "winner_result": None,
         "error": None,
     }
-    rubric_responses = _rubric_generation_responses(case)
+    judging_responses, original_id_by_anonymous_id = _anonymous_responses(case)
 
     def build() -> RubricSet:
-        rubrics = harness.build_rubrics(case.task, rubric_responses)
+        rubrics = harness.build_rubrics(case.task, judging_responses)
         # 显式调用基类校验器，候选实现无法通过覆盖方法绕过 evaluator。
         RewardSystem._validate_rubric_set(harness, case.task, rubrics)
         return rubrics
@@ -136,69 +130,29 @@ def evaluate_case(
         return outcome
     outcome["rubrics"] = _jsonable(rubrics)
 
-    def score_candidate(
-        candidate,
-    ) -> tuple[
-        JudgmentResult | None,
-        RewardResult | None,
-        str | None,
-        str | None,
-    ]:
-        def score() -> JudgmentResult:
-            result = harness.score(case.task, candidate, rubrics)
-            RewardSystem._validate_judgment_result(
-                case.task, candidate, rubrics, result
-            )
-            return result
+    def judge() -> WinnerResult:
+        result = harness.judge(case.task, judging_responses, rubrics)
+        RewardSystem._validate_winner_result(case.task, judging_responses, result)
+        return result
 
-        judgment_result, error = _attempt(
-            score,
-            stage_retries,
-            on_retry=getattr(judge_llm, "invalidate_last", None),
-        )
-        if error or judgment_result is None:
-            return None, None, "score", error
+    winner, error = _attempt(
+        judge,
+        stage_retries,
+        on_retry=getattr(judge_llm, "invalidate_last", None),
+    )
+    if error or winner is None:
+        outcome["error"] = {"stage": "judge", "message": error}
+        return outcome
 
-        def aggregate() -> RewardResult:
-            result = harness.aggregate(
-                case.task,
-                candidate,
-                rubrics,
-                judgment_result,
-            )
-            RewardSystem._validate_reward_result(case.task, candidate, result)
-            return result
-
-        # A 阶段默认是确定性本地逻辑；失败时直接记录，不重复执行。
-        reward_result, error = _attempt(aggregate, 0)
-        if error or reward_result is None:
-            return judgment_result, None, "aggregate", error
-        return judgment_result, reward_result, None, None
-
-    if score_executor is None:
-        scored = [score_candidate(candidate) for candidate in case.candidates]
-    else:
-        # 同题候选彼此独立，只共享不可变 RubricSet；保持提交顺序以稳定结果顺序。
-        futures = [
-            score_executor.submit(score_candidate, candidate)
-            for candidate in case.candidates
-        ]
-        scored = [future.result() for future in futures]
-
-    for candidate, (judgment_result, reward_result, stage, error) in zip(
-        case.candidates, scored
-    ):
-        if judgment_result is not None:
-            outcome["judgment_results"].append(_jsonable(judgment_result))
-        if reward_result is not None:
-            outcome["reward_results"].append(_jsonable(reward_result))
-        if error or stage is not None:
-            if outcome["error"] is None:
-                outcome["error"] = {
-                    "stage": stage or "score",
-                    "response_id": candidate.response_id,
-                    "message": error,
-                }
+    original_winner_id = original_id_by_anonymous_id[winner.winner_response_id]
+    outcome["winner_result"] = {
+        "query_id": winner.query_id,
+        "winner_response_id": original_winner_id,
+        "metadata": {
+            **dict(winner.metadata),
+            "anonymous_winner_response_id": winner.winner_response_id,
+        },
+    }
     return outcome
 
 
@@ -242,8 +196,10 @@ def _sample_cases(
     return random.Random(seed).sample(cases, sample_size)
 
 
-def _rubric_generation_responses(case: BenchmarkCase) -> tuple[Response, ...]:
-    """移除候选身份并按内容稳定重排，避免原始顺序泄漏 preference label。"""
+def _anonymous_responses(
+    case: BenchmarkCase,
+) -> tuple[tuple[Response, ...], dict[str, str]]:
+    """稳定重排并匿名化 Responses，同时保留 evaluator 侧 ID 映射。"""
 
     ordered = sorted(
         case.candidates,
@@ -251,10 +207,15 @@ def _rubric_generation_responses(case: BenchmarkCase) -> tuple[Response, ...]:
             (case.case_id + "\0" + response.content).encode("utf-8")
         ).hexdigest(),
     )
-    return tuple(
+    anonymous = tuple(
         Response(response_id=f"anonymous_{index:03d}", content=response.content)
         for index, response in enumerate(ordered)
     )
+    original_id_by_anonymous_id = {
+        anonymous_response.response_id: original_response.response_id
+        for anonymous_response, original_response in zip(anonymous, ordered)
+    }
+    return anonymous, original_id_by_anonymous_id
 
 
 def _mean_summary_values(values: list[Any]) -> Any:
@@ -279,7 +240,7 @@ def _build_voting_outcomes(
     outcomes: list[dict[str, Any]],
     trial_num: int,
 ) -> list[dict[str, Any]]:
-    """把每轮最高分回答转换为跨轮投票率，供原 adapter 重新计分。"""
+    """对每轮 forced-choice winner 投票，平票保持 unresolved。"""
 
     by_case: dict[str, list[dict[str, Any]]] = {}
     for row in outcomes:
@@ -297,28 +258,28 @@ def _build_voting_outcomes(
         abstentions = 0
 
         for row in rows:
-            rewards = {
-                str(result["response_id"]): float(result["reward"])
-                for result in row.get("reward_results", [])
-                if str(result.get("response_id")) in votes
-            }
-            if row.get("error") or len(rewards) != len(response_ids):
+            winner = row.get("winner_result")
+            winner_id = (
+                str(winner.get("winner_response_id"))
+                if isinstance(winner, dict)
+                else ""
+            )
+            if row.get("error") or winner_id not in votes:
                 abstentions += 1
                 continue
-            best = max(rewards.values())
-            winners = [
-                response_id
-                for response_id in response_ids
-                if rewards[response_id] == best
-            ]
-            vote = 1.0 / len(winners)
-            for response_id in winners:
-                votes[response_id] += vote
+            votes[winner_id] += 1.0
 
         vote_rates = {
             response_id: votes[response_id] / trial_num
             for response_id in response_ids
         }
+        best_vote = max(votes.values()) if votes else 0.0
+        voting_winners = [
+            response_id
+            for response_id in response_ids
+            if votes[response_id] == best_vote and best_vote > 0
+        ]
+        resolved_winner = voting_winners[0] if len(voting_winners) == 1 else None
         voting_outcomes.append(
             {
                 "case_id": case_id,
@@ -327,16 +288,15 @@ def _build_voting_outcomes(
                 "responses": prototype["responses"],
                 "gold": prototype["gold"],
                 "rubrics": None,
-                "judgment_results": [],
-                "reward_results": [
+                "winner_result": (
                     {
                         "query_id": prototype["query"]["query_id"],
-                        "response_id": response_id,
-                        "reward": vote_rates[response_id],
+                        "winner_response_id": resolved_winner,
                         "metadata": {"aggregation": "voting"},
                     }
-                    for response_id in response_ids
-                ],
+                    if resolved_winner is not None
+                    else None
+                ),
                 "model_calls": [],
                 "usage": {
                     "input_tokens": 0,
@@ -356,6 +316,7 @@ def _build_voting_outcomes(
                     "votes": votes,
                     "vote_rates": vote_rates,
                     "abstentions": abstentions,
+                    "tied": len(voting_winners) > 1,
                 },
             }
         )
@@ -414,7 +375,6 @@ def _run_one_case(
     trial_index: int,
     use_cache: bool,
     stage_retries: int,
-    score_executor: Executor | None = None,
 ) -> dict[str, Any]:
     rubric = backend.recorder("rubric", use_cache=use_cache)
     judge = backend.recorder("judge", use_cache=use_cache)
@@ -424,7 +384,6 @@ def _run_one_case(
         rubric,
         judge,
         stage_retries=stage_retries,
-        score_executor=score_executor,
     )
     outcome["trial_index"] = trial_index
     outcome["model_calls"] = [record.to_dict() for record in (*rubric.records, *judge.records)]
@@ -512,6 +471,7 @@ def run_configuration(
         "agent": harness.name,
         "agent_file": str(harness.source_path),
         "agent_source_sha256": harness.source_sha256,
+        "result_protocol": "winner",
         "backend": "vllm",
         "base_url": getattr(backend, "base_url", None),
         "model": backend.model,
@@ -537,10 +497,7 @@ def run_configuration(
     _write_json(run_directory / "config.json", config)
 
     with trajectories_path.open("a", encoding="utf-8", buffering=1) as stream:
-        with (
-            ThreadPoolExecutor(max_workers=request_workers) as score_executor,
-            ThreadPoolExecutor(max_workers=workers) as executor,
-        ):
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(
                     _run_one_case,
@@ -551,7 +508,6 @@ def run_configuration(
                     trial_index,
                     trial_num == 1,
                     stage_retries,
-                    score_executor,
                 ): (trial_index, case.case_id)
                 for trial_index, case in pending
             }
@@ -573,8 +529,7 @@ def run_configuration(
                         "responses": _jsonable(case.candidates),
                         "gold": _jsonable(case.gold),
                         "rubrics": None,
-                        "judgment_results": [],
-                        "reward_results": [],
+                        "winner_result": None,
                         "model_calls": [],
                         "usage": {"input_tokens": 0, "output_tokens": 0, "latency_ms": 0.0},
                         "error": {"stage": "evaluator", "message": f"{type(exc).__name__}: {exc}"},
@@ -605,6 +560,7 @@ def run_configuration(
                 )
 
     summary = _summarize_trials(adapter, existing, trial_num)
+    summary["result_protocol"] = "winner"
     summary["agent"] = harness.name
     summary["status"] = "complete"
     summary["trajectory_path"] = str(trajectories_path.resolve())
@@ -623,7 +579,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run Qwen3-8B reward harness benchmarks."
     )
-    parser.add_argument("--benchmarks", nargs="+", choices=sorted(ADAPTERS), default=["rewardbench2", "rmbench"])
+    parser.add_argument(
+        "--benchmarks",
+        nargs="+",
+        choices=sorted(ADAPTERS),
+        default=["rewardbench"],
+    )
     parser.add_argument(
         "--agents",
         "--harnesses",
@@ -631,7 +592,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=None,
         help=(
-            "Agent file stems to evaluate; default discovers every agents/*.py file. "
+            "Agent file stems to evaluate; default selects concrete winner-only agents. "
             "--harnesses is kept as a compatibility alias."
         ),
     )
@@ -641,12 +602,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--model", default="Qwen/Qwen3-8B")
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--max-tokens", type=int, default=2048)
     parser.add_argument(
         "--trial-num",
         type=int,
         default=1,
         help=(
-            "Run the complete benchmark N independent times (G, J and A), then "
+            "Run the complete benchmark N independent times (G and J), then "
             "report both Average@N and Voting@N from those runs."
         ),
     )
@@ -690,13 +652,14 @@ def main(argv: list[str] | None = None) -> int:
         args.workers < 1
         or args.request_workers < 1
         or args.trial_num < 1
+        or args.max_tokens < 1
         or args.temperature < 0
         or args.smoke_per_group < 0
         or args.sample_size < 0
         or args.stage_retries < 0
     ):
         raise SystemExit(
-            "workers, request-workers and trial-num must be >= 1; "
+            "workers, request-workers, trial-num and max-tokens must be >= 1; "
             "temperature must be >= 0; "
             "smoke-per-group, sample-size and stage-retries must be >= 0"
         )
@@ -713,11 +676,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Failed to discover agents: {exc}", file=sys.stderr)
         return 5
     by_name = {item.name: item for item in discovered}
-    requested_harnesses = args.harnesses or sorted(by_name)
+    concrete_names = {
+        name
+        for name, item in by_name.items()
+        if not inspect.isabstract(item.harness_type)
+    }
+    requested_harnesses = args.harnesses or sorted(concrete_names)
     unknown = sorted(set(requested_harnesses) - set(by_name))
     if unknown:
         print(
             f"Unknown harnesses {unknown}; discovered: {sorted(by_name)}",
+            file=sys.stderr,
+        )
+        return 5
+    abstract = sorted(set(requested_harnesses) - concrete_names)
+    if abstract:
+        print(
+            f"Agents {abstract} still implement the old score/aggregate protocol; "
+            "choose eval_skill_vanilla, eval_skill_rubric or eval_skill.",
             file=sys.stderr,
         )
         return 5
@@ -726,6 +702,15 @@ def main(argv: list[str] | None = None) -> int:
         "Discovered agents: " + ", ".join(item.name for item in discovered),
         flush=True,
     )
+
+    unsupported_benchmarks = sorted(set(args.benchmarks) - {"rewardbench"})
+    if unsupported_benchmarks:
+        print(
+            "The winner-only test branch currently supports RewardBench only; "
+            f"unsupported: {unsupported_benchmarks}",
+            file=sys.stderr,
+        )
+        return 4
 
     # 在连接 vLLM 之前验证本地数据，缺失或损坏时不产生模型请求。
     prepared: list[tuple[BenchmarkAdapter, list[BenchmarkCase]]] = []
@@ -783,6 +768,7 @@ def main(argv: list[str] | None = None) -> int:
         base_url=base_url,
         model=args.model,
         temperature=args.temperature,
+        max_tokens=args.max_tokens,
         request_workers=args.request_workers,
         cache_dir=run_root / ".llm_cache",
     )

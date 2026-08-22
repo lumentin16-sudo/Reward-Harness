@@ -22,9 +22,10 @@ Reward-Harness 是一个面向生成式 Reward Model / LLM-as-a-Judge 的评测�
 Reward-Harness/
 ├── reward_harness/                 # 可直接 import 的 Python 包
 │   ├── agents/                     # Reward Harness 实现
-│   │   ├── no_rubric.py            # 不生成 Rubric，直接输出标量分数
-│   │   ├── no_skill.py             # 直接生成 Rubric，再进行评分
-│   │   └── init_skill.py           # 动态选择 Skill、生成 Rubric 并评分
+│   │   ├── eval_skill_vanilla.py   # 官方 vanilla pairwise judging
+│   │   ├── eval_skill_rubric.py    # 官方 online-rubric pairwise judging
+│   │   ├── eval_skill.py           # 官方 Skill Prompt + 可优化离线 Skill
+│   │   └── _eval_skill_common.py   # 官方 Prompt 与 winner 解析公共逻辑
 │   ├── benchmarks/                 # 数据集适配器和官方风格指标
 │   │   ├── base.py                 # BenchmarkCase/BenchmarkAdapter 统一协议
 │   │   ├── rewardbench.py
@@ -174,17 +175,31 @@ bash run_rmbench_vllm.sh
 
 ## 内置 Agent / Baseline
 
-### `no_rubric`
+### `eval_skill_vanilla`
 
-不调用 `build_rubrics()` 中的模型生成逻辑，而是对每个候选回答直接请求一个 0～1 标量 reward。它用于衡量“指定模型直接打分”的基础能力。
+使用 Eval-Skill 官方 vanilla pairwise Prompt，一次查看完整的 Response A/B 并强制选择唯一 winner。
 
-### `no_skill`
+### `eval_skill_rubric`
 
-先根据 Query 和匿名、无标签、稳定重排的完整 Responses 生成具有区分度且可二值判断的共享 Rubric。评分时每条 Rubric 独立调用一次 Judge，只输出 0（FAIL）或 1（PASS）；A 阶段按 Rubric 权重计算加权通过率。它不执行 Skill 选择。
+先使用官方 Rubric Generation Prompt 根据 Query 在线生成 Rubric，再使用官方 rubric pairwise Prompt 比较完整 A/B 并选择 winner。
 
-### `init_skill`
+### `eval_skill`
 
-在生成 Rubric 和评分前动态选择 workflow Skill，并把对应提示内容注入模型 Prompt，包括任务目标、约束和 pointwise evidence 等指导。它同样采用逐 Rubric 独立的 0/1 Judge 和加权通过率聚合。Skill 本身不执行工具调用；额外成本来自 Skill 选择所需的模型请求，因此耗时和 token 用量高于 `no_skill`。
+把可由 Harness Optimization 编辑的离线 Skill 注入官方 skill pairwise Prompt，比较完整 A/B 并选择 winner。
+
+接近原项目 Qwen3-8B 推理设置的运行方式为：
+
+```bash
+python -m reward_harness.benchmark \
+  --benchmarks rewardbench \
+  --agents eval_skill_vanilla eval_skill_rubric eval_skill \
+  --smoke-per-group 0 \
+  --trial-num 3 \
+  --temperature 0.7 \
+  --max-tokens 10000
+```
+
+该 test 分支当前只支持两个候选的 RewardBench。旧的 pointwise Agent 文件仍保留用于对照，但不再实现当前 winner-only 抽象接口，因此 runner 会在启动前拒绝选择它们。
 
 每个 Skill 包含 `name`、`stage`、`description` 和 `content`。`stage` 取 `G`、`J` 或 `A`；选择前通过 `SkillRegistry.for_stage()` 构造独立 pool。目前 `task_objective`、`constraint_analysis` 属于 G，`pointwise_evidence` 属于 J，A pool 为空。同名 Skill 可以出现在不同阶段，但同一阶段内不能重名。
 
@@ -204,27 +219,16 @@ class MyHarness(RewardSystem):
     ) -> RubricSet:
         ...
 
-    def score(
+    def judge(
         self,
         task: Query,
-        candidate: Response,
+        responses: tuple[Response, ...],
         rubrics: RubricSet,
-    ) -> JudgmentResult:
-        ...
-
-    def aggregate(
-        self,
-        task: Query,
-        candidate: Response,
-        rubrics: RubricSet,
-        judgment_result: JudgmentResult,
-    ) -> RewardResult:
+    ) -> WinnerResult:
         ...
 ```
 
-`score()` 只负责 J 阶段并返回 `JudgmentResult`；`aggregate()` 负责 A 阶段，把 Judgment 聚合成 `RewardResult`。Harness 可以使用 0～5 加权平均、0～10 平均、最低项或硬约束策略。公共协议只要求每条 Rubric 恰好有一项 Judgment，并且最终 `RewardResult.reward` 归一化到 `[0,1]`。
-
-Benchmark runner 直接编排这四个接口：每条 Query 先将全部 Responses 移除 ID/metadata 并按内容稳定重排，再调用一次 `build_rubrics(query, responses)`；随后用同一个 `RubricSet` 为每个原始 Response 执行 `score()` 和 `aggregate()`。这样 G 可以发现候选间的实质差异，但无法利用原始位置或 gold，J 仍保持单 Response、单 Rubric 评分。
+Benchmark runner 会稳定重排并匿名化完整 Responses，再依次调用 `build_rubrics()` 和 `judge()`。`judge()` 直接返回绑定到匿名 Response 的 `WinnerResult`；evaluator 在模型调用结束后映射回原始 Response ID 并计算 RewardBench accuracy。
 
 把新的实现保存为 `reward_harness/agents/my_harness.py` 后，runner 会自动发现其中的 `RewardSystem` 子类。文件名 `my_harness` 就是 `--agents my_harness` 使用的名称。`__init__.py` 和以下划线开头的文件不会被扫描。
 
@@ -276,7 +280,7 @@ results/{run_tag}/{benchmark}/{harness}/{model}/
 └── summary.json
 ```
 
-- `trajectories.jsonl`：唯一的完整轨迹文件。每行独立保存 Query、Responses、evaluator-only gold、Harness metadata、Rubrics、JudgmentResults、RewardResults、完整模型请求响应、token、延迟、错误和 benchmark 单题结果。多次 trial 时用 `trial_index` 标记所属轮次。
+- `trajectories.jsonl`：唯一的完整轨迹文件。每行独立保存 Query、Responses、evaluator-only gold、Rubrics、WinnerResult、完整模型请求响应、token、延迟、错误和 benchmark 单题结果。多次 trial 时用 `trial_index` 标记所属轮次。
 - `summary.json`：顶层保存 Average@N 指标，`trials` 保存每一轮的独立指标，`voting_at_n` 保存各轮最高分回答投票后的 benchmark 指标，同时记录错误数、token/延迟统计和轨迹文件位置。
 - `config.json`：脱敏后的模型配置、数据配置、Agent 文件及源码 SHA-256。
 
@@ -310,6 +314,7 @@ API 请求或 JSON/schema 解析在重试后仍失败时，该 case 会记录 `e
 --stage-retries    Rubric/Judge 等阶段失败后的重试次数，默认 2
 --trial-num        完整独立运行整套评测 N 次，同时计算 Average@N 和 Voting@N，默认 1
 --temperature      模型采样温度；Average@N > 1 时建议使用正数
+--max-tokens       单次模型响应最大 token 数，默认 2048
 --base-url         vLLM OpenAI-compatible API 地址
 --model            服务端模型名，默认 Qwen/Qwen3-8B
 --data-dir         标准化 benchmark 数据目录

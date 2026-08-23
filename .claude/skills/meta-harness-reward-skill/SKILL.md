@@ -57,6 +57,18 @@ Every candidate must define exactly one `RewardSystem` subclass or set `HARNESS_
 
 ```python
 class RewardSystem(ABC):
+    def __init__(
+        self,
+        rubric_llm: LLMCallable,
+        judge_llm: LLMCallable,
+    ) -> None: ...
+
+    @property
+    def rubric_llm(self) -> LLMCallable: ...
+
+    @property
+    def judge_llm(self) -> LLMCallable: ...
+
     def get_skill_registry(self, task: Query) -> SkillRegistry: ...
 
     def build_rubrics(
@@ -79,15 +91,34 @@ class RewardSystem(ABC):
         rubrics: RubricSet,
         judgment_result: JudgmentResult,
     ) -> RewardResult: ...
+
+    def _task_payload(task: Query) -> dict[str, JSONValue]: ...
+    def _candidate_payload(candidate: Response) -> dict[str, JSONValue]: ...
+    def _responses_payload(responses: tuple[Response, ...]) -> list[dict[str, JSONValue]]: ...
+    def _rubrics_payload(rubrics: RubricSet) -> list[dict[str, JSONValue]]: ...
+    def _skills_payload(skills: tuple[Skill, ...]) -> list[dict[str, JSONValue]]: ...
+    def _parse_skill_calls(raw_response: str, registry: SkillRegistry) -> tuple[str, ...]: ...
+    def _parse_rubrics(raw_response: str) -> tuple[Rubric, ...]: ...
+    def _parse_judgments(raw_response: str, rubrics: RubricSet) -> tuple[RubricJudgment, ...]: ...
+    def _validate_rubric_set(self, task: Query, rubrics: RubricSet) -> None: ...
+    def _validate_judgment_result(task: Query, candidate: Response, rubrics: RubricSet, result: JudgmentResult) -> None: ...
+    def _validate_reward_result(task: Query, candidate: Response, result: RewardResult) -> None: ...
 ```
 
 Extend `RewardSystem` from `..reward_system`
-Import `Query`, `Response`, `Rubric`, `RubricSet`, `Skill`, `SkillStage`, `SkillRegistry`, `RubricJudgment`, `JudgmentResult`, and `RewardResult` from `..reward_system`
+Import `LLMCallable`, `Query`, `Response`, `Rubric`, `RubricSet`, `Skill`, `SkillStage`, `SkillRegistry`, `RubricJudgment`, `JudgmentResult`, and `RewardResult` from `..reward_system`
 `Skill` requires `name`, `stage`, `description`, and `content`; stage must be `"G"`, `"J"`, or `"A"`
+Use `registry.for_stage("G")`, `registry.for_stage("J")`, or `registry.for_stage("A")` before skill selection when a stage-specific skill pool is needed
+Use `self._task_payload(task)` for public task payloads
+Use `self._candidate_payload(candidate)` for single-response judge payloads
 Use `self._responses_payload(responses)` for anonymized response-set payloads in rubric generation (NOT custom payloads with IDs or labels)
+Use `self._rubrics_payload(rubrics)` for judge-visible rubric payloads
+Use `self._skills_payload(selected_skills)` for selected skill payloads
 Use `self._parse_skill_calls(response, registry)` for skill selection parsing (NOT custom regex)
 Use `self._parse_rubrics(response)` for rubric extraction (NOT custom regex)
 Use `self._parse_judgments(response, rubrics)` for judgment extraction (NOT custom regex)
+Do NOT override `_task_payload`, `_candidate_payload`, `_responses_payload`, `_rubrics_payload`, `_skills_payload`, `_parse_skill_calls`, `_parse_rubrics`, `_parse_judgments`, `_validate_rubric_set`, `_validate_judgment_result`, or `_validate_reward_result`
+The benchmark/evaluator calls `_validate_rubric_set`, `_validate_judgment_result`, and `_validate_reward_result`; candidates should satisfy these checks rather than bypass them
 Use `self.rubric_llm(prompt)` for rubric generation calls (NOT `self._rubric_llm` directly)
 Use `self.judge_llm(prompt)` for response scoring calls (NOT `self._judge_llm` directly)
 `build_rubrics` and `score` must work without any prior learning (cold start)

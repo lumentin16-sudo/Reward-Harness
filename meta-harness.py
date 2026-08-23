@@ -468,7 +468,8 @@ def _evaluate(
                 scores[benchmark] = _metric(summary, args.metric_path)
             except (KeyError, TypeError):
                 scores[benchmark] = 0.0
-            errors += int(summary.get("num_errors", 0) or 0) if isinstance(summary, dict) else 0
+            counts = summary.get("counts", {}) if isinstance(summary, dict) else {}
+            errors += int(counts.get("errors", 0) or 0) if isinstance(counts, dict) else 0
         evaluated[agent] = {
             "scores": scores,
             "avg_val": sum(scores.values()) / len(scores) if scores else 0.0,

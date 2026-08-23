@@ -22,10 +22,9 @@ Reward-Harness 是一个面向生成式 Reward Model / LLM-as-a-Judge 的评测�
 Reward-Harness/
 ├── reward_harness/                 # 可直接 import 的 Python 包
 │   ├── agents/                     # Reward Harness 实现
-│   │   ├── eval_skill_vanilla.py   # 官方 vanilla pairwise judging
-│   │   ├── eval_skill_rubric.py    # 官方 online-rubric pairwise judging
-│   │   ├── eval_skill.py           # 官方 Skill Prompt + 可优化离线 Skill
-│   │   └── _eval_skill_common.py   # 官方 Prompt 与 winner 解析公共逻辑
+│   │   ├── no_rubric.py            # 官方 vanilla pairwise judging
+│   │   ├── no_skill.py             # 官方 online-rubric pairwise judging
+│   │   └── init_skill.py           # 官方 Skill Prompt + 可优化离线 Skill
 │   ├── benchmarks/                 # 数据集适配器和官方风格指标
 │   │   ├── base.py                 # BenchmarkCase/BenchmarkAdapter 统一协议
 │   │   ├── rewardbench.py
@@ -127,8 +126,8 @@ Qwen/Qwen3-8B
 
 ```bash
 python -m reward_harness.benchmark \
-  --benchmarks rewardbench2 rmbench \
-  --agents no_skill
+  --benchmarks rewardbench \
+  --agents no_rubric
 ```
 
 ### 全量评测
@@ -137,7 +136,7 @@ python -m reward_harness.benchmark \
 
 ```bash
 python -m reward_harness.benchmark \
-  --benchmarks rewardbench rewardbench2 rmbench \
+  --benchmarks rewardbench \
   --agents no_rubric no_skill init_skill \
   --smoke-per-group 0
 ```
@@ -146,8 +145,8 @@ python -m reward_harness.benchmark \
 
 ```bash
 python -m reward_harness.benchmark \
-  --benchmarks rewardbench2 \
-  --agents no_skill \
+  --benchmarks rewardbench \
+  --agents no_rubric \
   --smoke-per-group 0 \
   --sample-size 3000 \
   --seed 42
@@ -159,7 +158,7 @@ python -m reward_harness.benchmark \
 python -m reward_harness.benchmark \
   --base-url http://SERVER_IP:8000/v1 \
   --model Qwen/Qwen3-8B \
-  --benchmarks rmbench \
+  --benchmarks rewardbench \
   --agents no_rubric \
   --smoke-per-group 0
 ```
@@ -175,15 +174,15 @@ bash run_rmbench_vllm.sh
 
 ## 内置 Agent / Baseline
 
-### `eval_skill_vanilla`
+### `no_rubric`
 
 使用 Eval-Skill 官方 vanilla pairwise Prompt，一次查看完整的 Response A/B 并强制选择唯一 winner。
 
-### `eval_skill_rubric`
+### `no_skill`
 
 先使用官方 Rubric Generation Prompt 根据 Query 在线生成 Rubric，再使用官方 rubric pairwise Prompt 比较完整 A/B 并选择 winner。
 
-### `eval_skill`
+### `init_skill`
 
 把可由 Harness Optimization 编辑的离线 Skill 注入官方 skill pairwise Prompt，比较完整 A/B 并选择 winner。
 
@@ -192,7 +191,7 @@ bash run_rmbench_vllm.sh
 ```bash
 python -m reward_harness.benchmark \
   --benchmarks rewardbench \
-  --agents eval_skill_vanilla eval_skill_rubric eval_skill \
+  --agents no_rubric no_skill init_skill \
   --smoke-per-group 0 \
   --trial-num 3 \
   --temperature 0.7 \
@@ -254,12 +253,12 @@ BenchmarkCase
 
 ## 并发模型
 
-Runner 使用两层并发：
+Runner 使用请求限流和 case 级并发：
 
 - `--workers`：同时处理多少道 benchmark 题目，默认 4；
 - `--request-workers`：全局最多允许多少个在途 LLM 请求，默认 16。
 
-同一道题完成一次 Rubric 生成后，不同 Response 可以并发评分；每个 Response 内部按 Rubric 逐条调用 Judge。若一题有 R 个 Response、K 条 Rubric，`no_skill` 需要 R×K 次 Judge 调用，`init_skill` 还会增加 Skill 选择调用。所有请求共用 `--request-workers` 全局上限。
+每道题把完整匿名 A/B 放进一次 comparative Judge 调用；`no_skill` 额外执行一次在线 Rubric Generation。所有请求共用 `--request-workers` 全局上限。
 
 对四卡 DP=4 的 Qwen3-8B，可以从下面的配置开始调试：
 

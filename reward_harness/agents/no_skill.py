@@ -1,202 +1,184 @@
-"""不注入 Skill 的独立 Reward Harness baseline。"""
+"""Eval-Skill 官方 online rubric-based pairwise judging Harness。"""
 
 from __future__ import annotations
 
-import json
-
 from ..reward_system import (
-    Response,
-    JudgmentResult,
-    RewardResult,
-    RewardSystem,
     Query,
+    Response,
+    RewardSystem,
+    Rubric,
     RubricSet,
     SkillRegistry,
+    WinnerResult,
 )
+HARNESS_NAME = "no_skill"
 
 
-RUBRIC_GENERATION_PROMPT = """You are an expert evaluation-rubric designer.
+RUBRIC_GENERATION_PROMPT = """
+**Task:** Extract a set of evaluation criteria (a rubric) from the `<Target Request>`. The rubric will be used to assess whether a response fully satisfies the request.
 
-Generate one shared set of task-specific evaluation rubrics from the public
-query and an anonymized, unlabeled response set. Preference labels are
-intentionally unavailable; do not infer them from response order.
+1. **Comprehensiveness:**
+   - The rubric must cover all critical aspects implied by the request and examples, including both explicit requirements and implicit quality standards.
 
-[Public Task]
-{task_json}
+2. **Conciseness & Uniqueness:**
+   - Each item must represent a distinct evaluation criterion. Merge overlapping or redundant criteria into a single item. Use precise, non-repetitive wording.
+   - Do NOT introduce formatting requirements or constraints unless they are explicitly specified in the `<Target Request>`.
 
-[Anonymized Response Set]
-{responses_json}
+3. **Categorization:** Classify each rubric item using one of the following tags:
+   - `[Core Requirement]`: Directly derived from explicit requirements in the `<Target Request>` (e.g., format, length, structure, required/forbidden elements).
+   - `[Qualitative Nuance]`: Derived by abstracting concrete cues into domain-agnostic quality criteria (e.g., clarity, correctness, reasoning quality, pedagogy).
 
-Requirements:
-- First infer the task's core intent, explicit constraints, and necessary
-  implicit quality standards.
-- Compare the responses only to discover substantive quality differences and
-  common omissions. The response order is arbitrary and carries no meaning.
-- Return 2 to 6 task-specific, non-overlapping rubrics that jointly cover the
-  critical requirements. Avoid generic criteria unless the task requires them.
-- Each rubric must be one atomic, binary-verifiable requirement observable from
-  a single response. It must be possible to answer only PASS or FAIL.
-- Make the pass condition concrete and self-contained. State the required fact,
-  reasoning step, constraint, or behavior instead of using broad labels such as
-  "correct", "clear", "helpful", or "high quality" without an explicit test.
-- A response receives PASS only when it fully satisfies the stated condition;
-  partial satisfaction must be scored FAIL.
-- Every rubric must remain independently applicable to any single response.
-  Never mention response positions, identifiers, comparisons, winners, or the
-  observed response set in the criterion.
-- Cover indispensable query requirements even when every observed response
-  misses them. Ignore incidental wording, verbosity, and formatting differences.
-- Give explicit/core requirements more weight than optional qualitative nuance.
-- weight must be between 0.5 and 2.0 and represent relative importance.
-- Do not invent formatting constraints or candidate-specific requirements.
-- Return JSON only, with this schema:
-{{
-  "rubrics": [
-    {{
-      "rubric_id": "short_unique_id",
-      "criterion": "PASS if the response ...; otherwise FAIL",
-      "weight": 1.0
-    }}
-  ]
-}}
-"""
+**[Target Request]:**
+{prompt}
+
+**Rubric Format Requirements:**
+- Use a numbered list.
+- Each item must begin with "The response" (third-person phrasing).
+- Append `[Core Requirement]` or `[Qualitative Nuance]` to the end of each item.
+- Do NOT include reasoning, explanations, or examples—output only the rubric items.
+
+**Output Rubrics:**
+""".strip()
 
 
-RUBRIC_EVALUATION_PROMPT = """You are a fair and impartial pointwise reward judge.
+RUBRIC_PAIRWISE_JUDGE_PROMPT = """
+You are a fair, impartial, and highly capable judge. Your task is to evaluate 'Response A' and 'Response B' based on a given instruction and a rubric.
 
-Evaluate the single response against the one supplied rubric. Do not compare it
-with another answer, infer its pair position, or assume access to preference
-labels.
+### Phase 1: Core Intent Alignment
+First, identify the fundamental "Core Intent" of the user's instruction. What is the user actually trying to achieve or learn?
+If any rubric criteria seem overly specific, arbitrary, or disconnected from this Core Intent, you must prioritize the Core Intent over those specific criteria. Write a 1-2 sentence summary of the Core Intent.
 
-[Public Task]
-{task_json}
+### Phase 2: Holistic Analysis
+Evaluate each response against the rubric criteria, keeping the Core Intent in mind.
+- Assess **conceptual accuracy** over mere keyword density. A response that lists many details but misses the conceptual truth is worse than a concise, accurate response.
+- For each response, cite concrete evidence, but evaluate the *degree* of quality rather than a simple pass/fail.
 
-[Single Rubric]
-{rubrics_json}
+### Phase 3: Final Judgment
+Based on the analysis, determine the winner. Weigh the [Core Requirement] items heavily, but use the [Qualitative Nuance] items to break ties or identify superior reasoning.
+Think step-by-step to aggregate the findings and make the decision; keep the reasoning explicit and concise.
+**NOTE**: You must select a winner even if all responses fail the requirements. Never respond with "None" or "Neither" as the winner.
 
-[Response]
-{candidate_json}
+### REQUIRED OUTPUT FORMAT
+You must follow this exact output format below.
 
-Requirements:
-- Return exactly one judgment for the supplied rubric_id.
-- score must be the integer 1 when the response fully satisfies the binary pass
-  condition, otherwise 0. Do not award partial credit.
-- evidence must quote or briefly identify observable response content.
-- Prioritize correctness, core intent, and explicit instruction following.
-  Do not reward verbosity, polished style, or repeated claims by themselves.
-- Return JSON only, with this schema:
-{{
-  "judgments": [
-    {{
-      "rubric_id": "matching rubric id",
-      "score": 0,
-      "evidence": ["short evidence"],
-      "confidence": 0.0
-    }}
-  ]
-}}
-"""
+--- Core Intent Alignment ---
+Identified Core Intent: <1-2 sentences explaining the fundamental goal of the user's instruction>
+
+--- Analysis ---
+**Response A:**
+- Criterion 1 [Tag]: Justification: <...>
+- Criterion 2 [Tag]: Justification: <...>
+- Conceptual Accuracy & Tone: <Briefly assess if the response actually answers the Core Intent accurately>
+
+**Response B:**
+- Criterion 1 [Tag]: Justification: <...>
+- Criterion 2 [Tag]: Justification: <...>
+- Conceptual Accuracy & Tone: <...>
+
+--- Final Judgment ---
+Aggregation Summary: <1-3 sentences explaining how the responses aligned with the Core Intent and the rubric to lead to your decision>
+Justification: <...>
+Winner: <Response A / Response B>
+
+Task to Evaluate:
+Instruction:
+{instruction}
+
+Rubric:
+{rubric}
+
+{response_block}
+""".strip()
+
+
+def _response_block(responses: tuple[Response, ...]) -> str:
+    if len(responses) != 2:
+        raise ValueError("Eval-Skill pairwise judging requires exactly 2 responses")
+    return "".join(
+        f"--- Response {label} ---\n"
+        f"{response.content.strip()}\n"
+        f"--- End Response {label} ---\n"
+        for label, response in zip(("A", "B"), responses)
+    )
+
+
+def _winner_result(
+    query: Query,
+    responses: tuple[Response, ...],
+    evaluation: str,
+) -> WinnerResult:
+    prediction = (
+        evaluation.rsplit("Final Decision", 1)[-1]
+        .rsplit("Final Judgment", 1)[-1]
+        .split("Winner", 1)[-1]
+        .split("Response", 1)[-1]
+        .split("Candidate", 1)[-1]
+    )
+    prediction = (
+        prediction.replace("*", "")
+        .replace(":", "")
+        .replace(".", "")
+        .replace(" ", "")
+        .strip()
+    )
+    label = prediction[0].upper() if prediction else ""
+    if label not in {"A", "B"}:
+        raise ValueError("Eval-Skill judge must declare Winner: Response A/B")
+    return WinnerResult(
+        query_id=query.query_id,
+        winner_response_id=responses[ord(label) - ord("A")].response_id,
+        metadata={
+            "winner_label": label,
+            "comparison": "pairwise_forced_choice",
+            "method": "no_skill",
+        },
+    )
 
 
 class NoSkillHarness(RewardSystem):
-    """直接实现 RewardSystem 接口的独立 no-skill baseline。"""
-
     rubric_prompt_template = RUBRIC_GENERATION_PROMPT
-    judge_prompt_template = RUBRIC_EVALUATION_PROMPT
+    judge_prompt_template = RUBRIC_PAIRWISE_JUDGE_PROMPT
 
     def get_skill_registry(self, task: Query) -> SkillRegistry:
         return SkillRegistry()
 
-    def aggregate(
-        self,
-        task: Query,
-        candidate: Response,
-        rubrics: RubricSet,
-        judgment_result: JudgmentResult,
-    ) -> RewardResult:
-        """A：按 Rubric 权重聚合二值 Judgment。"""
-
-        judgments = judgment_result.judgments
-        if not judgments:
-            raise ValueError("cannot aggregate an empty judgment set")
-        for judgment in judgments:
-            if not isinstance(judgment.score, int) or judgment.score not in {0, 1}:
-                raise ValueError("no_skill expects binary integer scores 0 or 1")
-
-        judgment_by_id = {judgment.rubric_id: judgment for judgment in judgments}
-        total_weight = sum(rubric.weight for rubric in rubrics.rubrics)
-        weighted_score = sum(
-            rubric.weight * judgment_by_id[rubric.rubric_id].score
-            for rubric in rubrics.rubrics
-        )
-        reward = weighted_score / total_weight
-        return RewardResult(
-            query_id=task.query_id,
-            response_id=candidate.response_id,
-            reward=reward,
-            metadata={"aggregation": "weighted_binary_mean"},
-        )
-
     def build_rubrics(
+        self, task: Query, responses: tuple[Response, ...]
+    ) -> RubricSet:
+        raw_rubric = self.rubric_llm(
+            self.rubric_prompt_template.format(prompt=task.instruction)
+        ).strip()
+        if len(raw_rubric) < 10:
+            raise ValueError("Eval-Skill rubric generation returned an empty rubric")
+        return RubricSet(
+            query_id=task.query_id,
+            rubrics=(
+                Rubric(
+                    rubric_id="no_skill_online_rubric",
+                    criterion=raw_rubric,
+                ),
+            ),
+            metadata={"method": "no_skill"},
+        )
+
+    def judge(
         self,
         task: Query,
         responses: tuple[Response, ...],
-    ) -> RubricSet:
-        task_payload = self._task_payload(task)
-        prompt = self.rubric_prompt_template.format(
-            task_json=json.dumps(task_payload, ensure_ascii=False, indent=2),
-            responses_json=json.dumps(
-                self._responses_payload(responses),
-                ensure_ascii=False,
-                indent=2,
-            ),
-        )
-        raw_response = self.rubric_llm(prompt)
-        rubrics = self._parse_rubrics(raw_response)
-
-        return RubricSet(
-            query_id=task.query_id,
-            rubrics=rubrics,
-            metadata={"selected_skills": []},
-        )
-
-    def score(
-        self,
-        task: Query,
-        candidate: Response,
         rubrics: RubricSet,
-    ) -> JudgmentResult:
-        task_payload = self._task_payload(task)
-        candidate_payload = self._candidate_payload(candidate)
-        judgments = []
-        for rubric in rubrics.rubrics:
-            single_rubric_set = RubricSet(
-                query_id=rubrics.query_id,
-                rubrics=(rubric,),
-            )
-            prompt = self.judge_prompt_template.format(
-                task_json=json.dumps(task_payload, ensure_ascii=False, indent=2),
-                rubrics_json=json.dumps(
-                    self._rubrics_payload(single_rubric_set),
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                candidate_json=json.dumps(
-                    candidate_payload, ensure_ascii=False, indent=2
-                ),
-            )
-            raw_response = self.judge_llm(prompt)
-            judgments.extend(
-                self._parse_judgments(raw_response, single_rubric_set)
-            )
-
-        return JudgmentResult(
-            query_id=task.query_id,
-            response_id=candidate.response_id,
-            judgments=tuple(judgments),
-            metadata={
-                "selected_skills": [],
-                "grading": "independent_per_rubric",
-                "score_scale": "binary",
-            },
+    ) -> WinnerResult:
+        if len(rubrics.rubrics) != 1:
+            raise ValueError("Eval-Skill rubric Harness expects one online rubric")
+        prompt = self.judge_prompt_template.format(
+            instruction=task.instruction,
+            rubric=rubrics.rubrics[0].criterion,
+            response_block=_response_block(responses),
         )
+        return _winner_result(
+            task,
+            responses,
+            self.judge_llm(prompt),
+        )
+
+
+HARNESS_CLASS = NoSkillHarness

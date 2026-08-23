@@ -59,7 +59,7 @@ python -m reward_harness.benchmark \
 均已自动启用。
 
 test 分支使用 winner-only 协议，当前只支持 RewardBench 的两个候选。可选择三个具体 Harness：
-`eval_skill_vanilla`、`eval_skill_rubric` 和 `eval_skill`。它们分别使用用户提供的 Eval-Skill
+`no_rubric`、`no_skill` 和 `init_skill`。它们分别使用用户提供的 Eval-Skill
 `evaluation.py` 中 vanilla、rubric 和 skill pairwise Prompt，并直接输出唯一 winner。
 
 复现实验调用参数可使用：
@@ -67,7 +67,7 @@ test 分支使用 winner-only 协议，当前只支持 RewardBench 的两个候�
 ```bash
 python -m reward_harness.benchmark \
   --benchmarks rewardbench \
-  --agents eval_skill_vanilla eval_skill_rubric eval_skill \
+  --agents no_rubric no_skill init_skill \
   --model Qwen/Qwen3-8B \
   --temperature 0.7 \
   --trial-num 3 \
@@ -83,7 +83,7 @@ Runner 当前统一关闭 Qwen3 thinking；请求重试、并发和结果落盘�
 
 ```text
 --benchmarks rewardbench
---agents eval_skill_vanilla eval_skill_rubric eval_skill
+--agents no_rubric no_skill init_skill
 --workers 4
 --request-workers 16
 --trial-num 1

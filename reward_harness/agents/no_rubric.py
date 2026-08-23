@@ -1,136 +1,125 @@
-"""不生成 Rubric、由 Judge 直接输出标量奖励的 baseline。"""
+"""Eval-Skill 官方 vanilla pairwise judging Harness。"""
 
 from __future__ import annotations
 
-import json
-
 from ..reward_system import (
-    Response,
-    JudgmentResult,
-    RewardResult,
-    RewardSystem,
     Query,
+    Response,
+    RewardSystem,
     RubricSet,
     SkillRegistry,
-    _extract_json_object,
+    WinnerResult,
 )
 
 
-DIRECT_SCORE_PROMPT = """You are a fair and impartial pointwise reward model.
+HARNESS_NAME = "no_rubric"
 
-Evaluate one candidate response for one public task. Judge only the response
-shown below. You cannot see any competing response, preference label, or pair
-position, and must not guess them.
 
-[Public Task]
-{task_json}
+VANILLA_PAIRWISE_JUDGE_PROMPT = """
+You are a fair and impartial judge. Your task is to evaluate 'Response A' and 'Response B' based on a given instruction to select the single best response. You will conduct this evaluation in distinct phases as outlined below.
 
-[Response]
-{candidate_json}
+### Phase 1: Analyze Each Response
+Analyze each response individually against the user instruction. Think step-by-step about the strengths and weaknesses of each response, considering factors such as helpfulness, clarity, accuracy, formatting, and adherence to the user's explicit and implicit constraints. Provide a concise justification for your findings for each response.
 
-Evaluation protocol:
-1. Identify the user's core intent and every explicit constraint in the task.
-2. Check the response's correctness, instruction following, relevance,
-   completeness, reasoning quality, safety, and clarity where applicable.
-3. Distinguish major errors that change the answer from minor omissions or
-   presentation flaws. Do not reward verbosity, confidence, polished style, or
-   repeated claims unless they improve task fulfillment.
-4. Ground the reason in concrete response content, then assign a calibrated
-   score. Use the anchors as guidance, not as the only allowed values:
-   - 1.00: fully correct and satisfies all important requirements;
-   - 0.75: mostly correct and useful, with only minor limitations;
-   - 0.50: mixed quality, partially useful but with substantive defects;
-   - 0.25: major errors or omissions, with little usable value;
-   - 0.00: wholly incorrect, irrelevant, unsafe, or unusable.
+### Phase 2: Final Judgment Instructions
+Based on the results from the previous phase, determine the overall winner. Provide a final justification explaining your decision first, and then give your final decision. Consider which response best meets the user's needs with the fewest flaws.
+Think step-by-step to aggregate the findings and make the decision; keep the reasoning explicit and concise.
+**NOTE**: You must select a winner. Never respond with "None" or "Neither" as the winner.
 
-Return JSON only. Put the reason before the score so the judgment is based on
-an explicit assessment rather than an unsupported number:
-{{
-  "reason": "brief evidence-based explanation",
-  "score": 0.0
-}}
+### REQUIRED OUTPUT FORMAT
+You must follow this exact output format below.
 
-Requirements:
-- score must be a finite number between 0.0 and 1.0 inclusive.
-- Use sufficient decimal resolution to express meaningful quality differences;
-  do not mechanically round every response to an anchor.
-- Base the score only on the public task and candidate content.
-"""
+--- Analysis ---
+**Response A:** Justification: <...>
+**Response B:** Justification: <...>
+
+--- Final Judgment ---
+Aggregation Summary: <1-3 sentences explaining why the winning response was chosen over the other>
+Justification: <...>
+Winner: <Response A / Response B>
+
+Task to Evaluate:
+Instruction:
+{instruction}
+
+{response_block}
+""".strip()
+
+
+def _response_block(responses: tuple[Response, ...]) -> str:
+    if len(responses) != 2:
+        raise ValueError("Eval-Skill pairwise judging requires exactly 2 responses")
+    return "".join(
+        f"--- Response {label} ---\n"
+        f"{response.content.strip()}\n"
+        f"--- End Response {label} ---\n"
+        for label, response in zip(("A", "B"), responses)
+    )
+
+
+def _winner_result(
+    query: Query,
+    responses: tuple[Response, ...],
+    evaluation: str,
+) -> WinnerResult:
+    prediction = (
+        evaluation.rsplit("Final Decision", 1)[-1]
+        .rsplit("Final Judgment", 1)[-1]
+        .split("Winner", 1)[-1]
+        .split("Response", 1)[-1]
+        .split("Candidate", 1)[-1]
+    )
+    prediction = (
+        prediction.replace("*", "")
+        .replace(":", "")
+        .replace(".", "")
+        .replace(" ", "")
+        .strip()
+    )
+    label = prediction[0].upper() if prediction else ""
+    if label not in {"A", "B"}:
+        raise ValueError("Eval-Skill judge must declare Winner: Response A/B")
+    return WinnerResult(
+        query_id=query.query_id,
+        winner_response_id=responses[ord(label) - ord("A")].response_id,
+        metadata={
+            "winner_label": label,
+            "comparison": "pairwise_forced_choice",
+            "method": "no_rubric",
+        },
+    )
 
 
 class NoRubricHarness(RewardSystem):
-    """跳过 G 阶段模型调用，直接执行单候选标量评分。"""
-
-    judge_prompt_template = DIRECT_SCORE_PROMPT
+    judge_prompt_template = VANILLA_PAIRWISE_JUDGE_PROMPT
 
     def get_skill_registry(self, task: Query) -> SkillRegistry:
         return SkillRegistry()
 
     def build_rubrics(
-        self,
-        task: Query,
-        responses: tuple[Response, ...],
+        self, task: Query, responses: tuple[Response, ...]
     ) -> RubricSet:
-        """保留统一接口，但不调用 Rubric Model。"""
-
         return RubricSet(
             query_id=task.query_id,
             rubrics=(),
-            metadata={"baseline": "no_rubric"},
+            metadata={"method": "no_rubric"},
         )
 
-    def score(
+    def judge(
         self,
         task: Query,
-        candidate: Response,
+        responses: tuple[Response, ...],
         rubrics: RubricSet,
-    ) -> JudgmentResult:
-        task_payload = self._task_payload(task)
-        candidate_payload = self._candidate_payload(candidate)
+    ) -> WinnerResult:
         prompt = self.judge_prompt_template.format(
-            task_json=json.dumps(task_payload, ensure_ascii=False, indent=2),
-            candidate_json=json.dumps(candidate_payload, ensure_ascii=False, indent=2),
+            instruction=task.instruction,
+            response_block=_response_block(responses),
         )
-        raw_response = self.judge_llm(prompt)
-        payload = _extract_json_object(raw_response)
-        raw_score = payload.get("score")
-        if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
-            raise ValueError("direct judge response must contain a numeric score")
-        direct_score = float(raw_score)
-        reason = payload.get("reason", "")
-        if reason is not None and not isinstance(reason, str):
-            raise ValueError("direct judge reason must be a string when provided")
-
-        return JudgmentResult(
-            query_id=task.query_id,
-            response_id=candidate.response_id,
-            judgments=(),
-            metadata={
-                "direct_score": direct_score,
-                "reason": reason or "",
-            },
+        return _winner_result(
+            task,
+            responses,
+            self.judge_llm(prompt),
         )
 
-    def aggregate(
-        self,
-        task: Query,
-        candidate: Response,
-        rubrics: RubricSet,
-        judgment_result: JudgmentResult,
-    ) -> RewardResult:
-        """A：把 Judge 已给出的直接标量作为最终 reward。"""
 
-        direct_score = judgment_result.metadata.get("direct_score")
-        if isinstance(direct_score, bool) or not isinstance(
-            direct_score, (int, float)
-        ):
-            raise ValueError("no_rubric JudgmentResult is missing direct_score")
-        return RewardResult(
-            query_id=task.query_id,
-            response_id=candidate.response_id,
-            reward=float(direct_score),
-            metadata={
-                "aggregation": "direct_scalar",
-                "reason": str(judgment_result.metadata.get("reason", "")),
-            },
-        )
+HARNESS_CLASS = NoRubricHarness

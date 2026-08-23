@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import inspect
 import json
 import random
 import re
@@ -676,24 +675,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Failed to discover agents: {exc}", file=sys.stderr)
         return 5
     by_name = {item.name: item for item in discovered}
-    concrete_names = {
-        name
-        for name, item in by_name.items()
-        if not inspect.isabstract(item.harness_type)
-    }
-    requested_harnesses = args.harnesses or sorted(concrete_names)
+    requested_harnesses = args.harnesses or sorted(by_name)
     unknown = sorted(set(requested_harnesses) - set(by_name))
     if unknown:
         print(
             f"Unknown harnesses {unknown}; discovered: {sorted(by_name)}",
-            file=sys.stderr,
-        )
-        return 5
-    abstract = sorted(set(requested_harnesses) - concrete_names)
-    if abstract:
-        print(
-            f"Agents {abstract} still implement the old score/aggregate protocol; "
-            "choose eval_skill_vanilla, eval_skill_rubric or eval_skill.",
             file=sys.stderr,
         )
         return 5

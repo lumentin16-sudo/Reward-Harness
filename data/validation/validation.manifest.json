@@ -1,0 +1,10 @@
+{
+  "schema_version": 2,
+  "benchmark": "validation",
+  "dataset_id": "nvidia/HelpSteer3",
+  "split": "validation",
+  "num_cases": 100,
+  "content_sha256": "f84dd63d4aa43cacd26c9d8ffe24d62db7144d5d11e1b61b6812ac8d9ea03a9c",
+  "source_fingerprint": "f6d145777bcbde96137596340fab89793acd1031",
+  "generated_at": "2026-08-23T15:35:52.468514+00:00"
+}

@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import io
+import json
 import os
+import random
+import urllib.request
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
-from .benchmarks.base import DEFAULT_DATA_ROOT, BenchmarkCase, write_processed_cases
+from .benchmarks.base import (
+    DEFAULT_DATA_ROOT,
+    BenchmarkCase,
+    public_text,
+    write_processed_cases,
+)
+from .reward_system import Query, Response
 from .benchmarks.rewardbench import RewardBenchAdapter
 from .benchmarks.rewardbench2 import RewardBench2Adapter
 from .benchmarks.rmbench import RMBenchAdapter
@@ -92,12 +103,192 @@ def _prepare_rmbench(
     )
 
 
-PREPARERS: dict[
-    str,
-    Callable[..., tuple[Path, Path]],
-] = {
+HELPSTEER3_DATASET_ID = "nvidia/HelpSteer3"
+HELPSTEER3_REVISION = "f6d145777bcbde96137596340fab89793acd1031"
+HELPSTEER3_DOMAINS = ("general", "stem", "code", "multilingual")
+HELPSTEER3_TRAIN_URL = (
+    "https://huggingface.co/datasets/nvidia/HelpSteer3/resolve/"
+    f"{HELPSTEER3_REVISION}/"
+    "preference/train.jsonl.gz"
+)
+
+
+def _iter_helpsteer3_rows(
+    *, offline: bool
+) -> tuple[Iterable[dict[str, Any]], str | None]:
+    """流式读取 HelpSteer3 Preference train，避免加载约 373MB 解压数据。"""
+
+    if offline:
+        os.environ["HF_DATASETS_OFFLINE"] = "1"
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        try:
+            from datasets import load_dataset
+        except ImportError as exc:
+            raise RuntimeError(
+                "Offline HelpSteer3 preparation requires the datasets package"
+            ) from exc
+        dataset = load_dataset(
+            HELPSTEER3_DATASET_ID,
+            "preference",
+            split="train",
+        )
+        fingerprint = getattr(dataset, "_fingerprint", None)
+        return (dict(row) for row in dataset), (
+            str(fingerprint) if fingerprint else None
+        )
+
+    def remote_rows() -> Iterable[dict[str, Any]]:
+        request = urllib.request.Request(
+            HELPSTEER3_TRAIN_URL,
+            headers={"User-Agent": "Reward-Harness/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=120) as response:
+            with gzip.GzipFile(fileobj=response) as compressed:
+                with io.TextIOWrapper(compressed, encoding="utf-8") as stream:
+                    for line_number, line in enumerate(stream, 1):
+                        if not line.strip():
+                            continue
+                        value = json.loads(line)
+                        if not isinstance(value, dict):
+                            raise ValueError(
+                                f"HelpSteer3 row {line_number} is not an object"
+                            )
+                        yield value
+
+    return remote_rows(), HELPSTEER3_REVISION
+
+
+def _helpsteer3_case(row: dict[str, Any], source_index: int) -> BenchmarkCase:
+    domain = str(row["domain"]).strip().lower()
+    preference = int(row["overall_preference"])
+    if preference == 0:
+        raise ValueError("HelpSteer3 tie rows cannot produce a unique winner")
+    response1 = public_text(row["response1"])
+    response2 = public_text(row["response2"])
+    chosen, rejected = (
+        (response1, response2) if preference < 0 else (response2, response1)
+    )
+    case_id = f"helpsteer3:{domain}:{source_index:06d}"
+    return BenchmarkCase(
+        case_id=case_id,
+        group=domain,
+        task=Query(
+            query_id=case_id,
+            instruction=public_text(row["context"]),
+            domain=domain,
+            metadata={"language": str(row.get("language", ""))},
+        ),
+        candidates=(
+            Response("candidate_000", chosen),
+            Response("candidate_001", rejected),
+        ),
+        gold={
+            "chosen_index": 0,
+            "domain": domain,
+            "language": str(row.get("language", "")),
+            "source_index": source_index,
+            "overall_preference": preference,
+            "preference_strength": abs(preference),
+            "preferred_source_response": 1 if preference < 0 else 2,
+            "individual_preference": list(row.get("individual_preference") or []),
+        },
+    )
+
+
+def _prepare_helpsteer3(
+    data_root: Path,
+    *,
+    force: bool,
+    offline: bool,
+    held_in_size: int = 900,
+    validation_size: int = 100,
+    helpsteer3_seed: int = 42,
+    **_: Any,
+) -> list[tuple[Path, Path]]:
+    """按四个 domain 均衡、互斥地抽取 held-in 与 validation。"""
+
+    if held_in_size <= 0 or validation_size <= 0:
+        raise ValueError("HelpSteer3 split sizes must be positive")
+    if held_in_size % 4 or validation_size % 4:
+        raise ValueError("HelpSteer3 split sizes must be divisible by 4 domains")
+    held_per_domain = held_in_size // 4
+    validation_per_domain = validation_size // 4
+    target_per_domain = held_per_domain + validation_per_domain
+
+    rows, fingerprint = _iter_helpsteer3_rows(offline=offline)
+    reservoirs: dict[str, list[tuple[int, dict[str, Any]]]] = {
+        domain: [] for domain in HELPSTEER3_DOMAINS
+    }
+    seen = {domain: 0 for domain in HELPSTEER3_DOMAINS}
+    rngs = {
+        domain: random.Random(f"{helpsteer3_seed}:{domain}")
+        for domain in HELPSTEER3_DOMAINS
+    }
+    for source_index, row in enumerate(rows):
+        domain = str(row.get("domain", "")).strip().lower()
+        if (
+            domain not in reservoirs
+            or int(row.get("overall_preference", 0)) == 0
+            or not public_text(row.get("context", "")).strip()
+            or not public_text(row.get("response1", "")).strip()
+            or not public_text(row.get("response2", "")).strip()
+        ):
+            continue
+        seen[domain] += 1
+        reservoir = reservoirs[domain]
+        item = (source_index, row)
+        if len(reservoir) < target_per_domain:
+            reservoir.append(item)
+            continue
+        replacement = rngs[domain].randrange(seen[domain])
+        if replacement < target_per_domain:
+            reservoir[replacement] = item
+
+    held_in_cases: list[BenchmarkCase] = []
+    validation_cases: list[BenchmarkCase] = []
+    for domain in HELPSTEER3_DOMAINS:
+        selected = reservoirs[domain]
+        if len(selected) != target_per_domain:
+            raise ValueError(
+                f"HelpSteer3 domain {domain!r} has only {len(selected)} usable rows"
+            )
+        rngs[domain].shuffle(selected)
+        held_in_cases.extend(
+            _helpsteer3_case(row, index)
+            for index, row in selected[:held_per_domain]
+        )
+        validation_cases.extend(
+            _helpsteer3_case(row, index)
+            for index, row in selected[held_per_domain:]
+        )
+
+    random.Random(helpsteer3_seed).shuffle(held_in_cases)
+    random.Random(helpsteer3_seed + 1).shuffle(validation_cases)
+    return [
+        write_processed_cases(
+            data_root,
+            benchmark="held_in",
+            dataset_id=HELPSTEER3_DATASET_ID,
+            split="train",
+            cases=held_in_cases,
+            source_fingerprint=fingerprint,
+            force=force,
+        ),
+        write_processed_cases(
+            data_root,
+            benchmark="validation",
+            dataset_id=HELPSTEER3_DATASET_ID,
+            split="validation",
+            cases=validation_cases,
+            source_fingerprint=fingerprint,
+            force=force,
+        ),
+    ]
+
+
+PREPARERS: dict[str, Callable[..., Any]] = {
+    "helpsteer3": _prepare_helpsteer3,
     "rewardbench": _prepare_rewardbench,
-    "rewardbench2": _prepare_rewardbench2,
     "rmbench": _prepare_rmbench,
 }
 
@@ -113,6 +304,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=sorted(PREPARERS),
     )
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_ROOT)
+    parser.add_argument("--held-in-size", type=int, default=900)
+    parser.add_argument("--validation-size", type=int, default=100)
+    parser.add_argument("--helpsteer3-seed", type=int, default=42)
     parser.add_argument(
         "--offline",
         action="store_true",
@@ -127,13 +321,21 @@ def main(argv: list[str] | None = None) -> int:
     data_root = args.data_dir.resolve()
     for name in args.benchmarks:
         print(f"Preparing {name}...", flush=True)
-        data_path, manifest_path = PREPARERS[name](
-            data_root,
-            force=args.force,
-            offline=args.offline,
-        )
-        print(f"  data: {data_path}", flush=True)
-        print(f"  manifest: {manifest_path}", flush=True)
+        prepare_kwargs = {
+            "force": args.force,
+            "offline": args.offline,
+        }
+        if name == "helpsteer3":
+            prepare_kwargs.update(
+                held_in_size=args.held_in_size,
+                validation_size=args.validation_size,
+                helpsteer3_seed=args.helpsteer3_seed,
+            )
+        prepared = PREPARERS[name](data_root, **prepare_kwargs)
+        outputs = prepared if isinstance(prepared, list) else [prepared]
+        for data_path, manifest_path in outputs:
+            print(f"  data: {data_path}", flush=True)
+            print(f"  manifest: {manifest_path}", flush=True)
     return 0
 
 

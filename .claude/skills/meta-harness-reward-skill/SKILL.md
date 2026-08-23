@@ -36,7 +36,7 @@ Good candidates change a mechanism:
 - A new skill bank organization.
 - A new rubric-generation workflow.
 - A new judge-skill-selection strategy.
-- Binary-checkable weighted rubrics.
+- Response-set-aware rubric discovery that remains pointwise-applicable.
 - Global rubric vs hard-constraint separation.
 - Better uncertainty, tie, or hard-failure handling.
 - Stronger evidence-first scoring.
@@ -59,7 +59,11 @@ Every candidate must define exactly one `RewardSystem` subclass or set `HARNESS_
 class RewardSystem(ABC):
     def get_skill_registry(self, task: Query) -> SkillRegistry: ...
 
-    def build_rubrics(self, task: Query) -> RubricSet: ...
+    def build_rubrics(
+        self,
+        task: Query,
+        responses: tuple[Response, ...],
+    ) -> RubricSet: ...
 
     def score(
         self,
@@ -78,7 +82,9 @@ class RewardSystem(ABC):
 ```
 
 Extend `RewardSystem` from `..reward_system`
-Import `Query`, `Response`, `Rubric`, `RubricSet`, `Skill`, `SkillRegistry`, `RubricJudgment`, `JudgmentResult`, and `RewardResult` from `..reward_system`
+Import `Query`, `Response`, `Rubric`, `RubricSet`, `Skill`, `SkillStage`, `SkillRegistry`, `RubricJudgment`, `JudgmentResult`, and `RewardResult` from `..reward_system`
+`Skill` requires `name`, `stage`, `description`, and `content`; stage must be `"G"`, `"J"`, or `"A"`
+Use `self._responses_payload(responses)` for anonymized response-set payloads in rubric generation (NOT custom payloads with IDs or labels)
 Use `self._parse_skill_calls(response, registry)` for skill selection parsing (NOT custom regex)
 Use `self._parse_rubrics(response)` for rubric extraction (NOT custom regex)
 Use `self._parse_judgments(response, rubrics)` for judgment extraction (NOT custom regex)
@@ -159,8 +165,8 @@ CANDIDATES: <name1>, <name2>, <name3>
 ## Current Baselines
 
 - `no_rubric.py`: no rubric generation; direct scalar reward.
-- `no_skill.py`: generates shared rubrics and scores responses without workflow skill selection.
-- `init_skill.py`: selects workflow skills for rubric generation and pointwise scoring.
+- `no_skill.py`: generates shared binary rubrics from the public query and anonymized unlabeled response set, then scores responses without workflow skill selection.
+- `init_skill.py`: selects stage-specific workflow skills for rubric generation (`G`) and pointwise scoring (`J`).
 
 Usually build candidates from `init_skill.py` unless the task prompt gives a different base.
 

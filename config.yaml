@@ -1,0 +1,47 @@
+# Meta-Harness 外循环配置。命令行同名参数会覆盖这里的值。
+
+run:
+  name: reward-search
+  iterations: 5
+  state_root: meta_runs
+
+codex:
+  bin: codex
+  model: gpt-5.6-sol
+  reasoning_effort: low
+  args: []
+  propose_timeout: 3600
+
+benchmark:
+  base_url: http://127.0.0.1:8000/v1
+  model: Qwen/Qwen3-8B
+  benchmarks:
+    - validation
+  baselines:
+    - no_rubric
+    - no_skill
+    - init_skill
+  metric_path: primary_metrics.beyond_rubric
+
+  # Harness Optimization 搜索阶段固定 trial_num=1。
+  temperature: 0.7
+  max_tokens: 10000
+  workers: 32
+  request_workers: 32
+  smoke_per_group: 0
+  sample_size: 0
+  seed: 42
+  stage_retries: 2
+  benchmark_timeout: 86400
+  skip_preflight: false
+
+paths:
+  data_dir: data
+  output_dir: results
+
+datasets:
+  held_in: held_in
+  validation: validation
+  held_out:
+    - rewardbench
+    - rmbench

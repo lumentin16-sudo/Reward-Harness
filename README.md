@@ -56,6 +56,7 @@ pip install -r requirements.txt
 
 - `openai`：访问 vLLM 的 OpenAI-compatible 接口。
 - `datasets`：在数据准备阶段下载或读取 Hugging Face 数据集。
+- `PyYAML`：读取 Meta-Harness 的 `config.yaml`。
 
 vLLM 请根据服务器 CUDA、PyTorch 和驱动环境单独安装。
 
@@ -65,7 +66,7 @@ vLLM 请根据服务器 CUDA、PyTorch 和驱动环境单独安装。
 
 ```bash
 python -m reward_harness.prepare_data \
-  --benchmarks rewardbench rewardbench2 rmbench
+  --benchmarks helpsteer3 rewardbench rmbench
 ```
 
 默认输出到：
@@ -77,11 +78,20 @@ data/{benchmark}/{split}.manifest.json
 
 manifest 会记录数据条数、来源 fingerprint 和内容 SHA-256，用于校验数据完整性与生成可复现的运行签名。
 
+HelpSteer3 使用 `preference/train` 中四个 domain 的非平局样本做均衡互斥抽样：
+
+```text
+data/held_in/train.jsonl             900 条，每域 225 条
+data/validation/validation.jsonl     100 条，每域 25 条
+```
+
+`overall_preference < 0` 表示原 Response 1 胜，`> 0` 表示 Response 2 胜；本地格式始终把 chosen 放在 `candidate_000`，原始偏好强度和 annotator reasoning 保存在 evaluator-only gold。
+
 如果 Hugging Face 数据已经存在于本机缓存，并且不希望程序访问网络：
 
 ```bash
 python -m reward_harness.prepare_data \
-  --benchmarks rewardbench rewardbench2 rmbench \
+  --benchmarks helpsteer3 rewardbench rmbench \
   --offline
 ```
 
@@ -163,13 +173,11 @@ python -m reward_harness.benchmark \
   --smoke-per-group 0
 ```
 
-也可以直接使用仓库中的脚本：
+也可以直接使用仓库中的脚本（先启动 vLLM，再运行 benchmark）：
 
 ```bash
-bash run_reward_benchmarks_vllm.sh
-bash run_rewardbench_vllm.sh
-bash run_rewardbench2_vllm.sh
-bash run_rmbench_vllm.sh
+bash start_vllm_4gpu.sh
+bash run_benchmark.sh
 ```
 
 ## 内置 Agent / Baseline
@@ -198,9 +206,9 @@ python -m reward_harness.benchmark \
   --max-tokens 10000
 ```
 
-该 test 分支当前只支持两个候选的 RewardBench。旧的 pointwise Agent 文件仍保留用于对照，但不再实现当前 winner-only 抽象接口，因此 runner 会在启动前拒绝选择它们。
+当前 winner-only runner 只使用 pairwise Prompt，支持 RewardBench，以及展开为 9 个 pair 的 RM-Bench。RewardBench 2 暂不参与评测。
 
-每个 Skill 包含 `name`、`stage`、`description` 和 `content`。`stage` 取 `G`、`J` 或 `A`；选择前通过 `SkillRegistry.for_stage()` 构造独立 pool。目前 `task_objective`、`constraint_analysis` 属于 G，`pointwise_evidence` 属于 J，A pool 为空。同名 Skill 可以出现在不同阶段，但同一阶段内不能重名。
+每个 Skill 包含 `name`、`stage`、`description` 和 `content`，`stage` 取 `G` 或 `J`。当前 `init_skill` 直接注入一个 J-stage comparative workflow。
 
 ## RewardSystem 接口
 
@@ -280,7 +288,7 @@ results/{run_tag}/{benchmark}/{harness}/{model}/
 ```
 
 - `trajectories.jsonl`：唯一的完整轨迹文件。每行独立保存 Query、Responses、evaluator-only gold、Rubrics、WinnerResult、完整模型请求响应、token、延迟、错误和 benchmark 单题结果。多次 trial 时用 `trial_index` 标记所属轮次。
-- `summary.json`：顶层保存 Average@N 指标，`trials` 保存每一轮的独立指标，`voting_at_n` 保存各轮最高分回答投票后的 benchmark 指标，同时记录错误数、token/延迟统计和轨迹文件位置。
+- `summary.json`：`primary_metrics` 保存关键指标，`metrics` 保存其余 benchmark 指标，`trials` 保存每轮结果，`voting` 保存 Voting@N，`counts`、`usage` 和 `artifacts` 分别保存计数、开销和轨迹路径。
 - `config.json`：脱敏后的模型配置、数据配置、Agent 文件及源码 SHA-256。
 
 成功的模型响应还会缓存在：
@@ -303,7 +311,7 @@ API 请求或 JSON/schema 解析在重试后仍失败时，该 case 会记录 `e
 ## 常用参数
 
 ```text
---benchmarks       rewardbench rewardbench2 rmbench
+--benchmarks       held_in validation rewardbench rmbench（rewardbench2 暂不评测）
 --agents           指定 Agent；省略时自动运行 reward_harness/agents/ 下的全部 Agent
 --agents-dir       自定义 Agent 目录
 --workers          题目级并发数，默认 4
@@ -329,5 +337,58 @@ API 请求或 JSON/schema 解析在重试后仍失败时，该 case 会记录 `e
 python -m reward_harness.benchmark --help
 python -m reward_harness.prepare_data --help
 ```
+
+## Harness Optimization（Codex CLI）
+
+`meta-harness.py` 实现 propose → validate → benchmark → frontier update 外循环。Codex CLI 只负责读取历史轨迹、原型机制并新增 3 个候选 Harness；可信 benchmark 始终由外循环单独执行。
+
+默认配置位于根目录 `config.yaml`，包含 run、Codex、benchmark 和路径设置。搜索阶段的 `trial_num` 不在 YAML 中配置，始终固定为 1。优先级为：
+
+```text
+命令行参数 > VLLM_BASE_URL 环境变量 > config.yaml
+```
+
+`datasets` 中统一填写逻辑数据集名称，实际目录由 `paths.data_dir` 解析。例如 `held_in: held_in` 对应 `data/held_in/`，具体 split 文件由 adapter 或读取方确定。
+
+服务器先完成 Codex CLI 登录并启动本地 vLLM，然后从仓库根目录运行：
+
+```bash
+python meta-harness.py \
+  --config config.yaml \
+  --run-name reward-search \
+  --iterations 5 \
+  --smoke-per-group 0 \
+  --sample-size 300
+```
+
+`config.yaml` 默认使用 `gpt-5.6-sol` 和 `low` reasoning effort；可通过 `--codex-model`、`--codex-reasoning-effort` 临时覆盖。继续使用同一个 `--run-name` 会根据 `evolution_summary.jsonl` 自动续跑；查看状态：
+
+```bash
+python meta-harness.py --run-name reward-search --status
+```
+
+搜索阶段固定使用 `trial_num=1`，默认优化 `primary_metrics.beyond_rubric`。Average@N 和 Voting@N 应在选出最终 Harness 后，通过独立的正式 benchmark 命令评测。
+
+Harness Optimization 只使用 `held_in` 做分析/学习，并在 100 条 `validation` 上更新 frontier。RewardBench 和 RM-Bench 作为 held-out 数据，不会在搜索任务提示中提供轨迹。
+
+每个 run 的外循环状态位于：
+
+```text
+meta_runs/{run_name}/
+├── evolution_summary.jsonl
+├── frontier_val.json
+├── pending_eval.json
+├── reports/
+├── codex_sessions/{iteration}/
+└── benchmark_logs/
+```
+
+模型完整轨迹仍保存在原有路径：
+
+```text
+results/mh-{run_name}-{baseline|iter-NNN}/{benchmark}/{harness}/{model}/
+```
+
+`--fresh` 不直接删除历史，而是把原 run 状态重命名为带时间戳的 `.bak_*` 目录。`--propose-only` 可用于只验证 Codex 候选生成链路而不启动 benchmark。
 
 更详细的 benchmark 说明见 [BENCHMARK.md](BENCHMARK.md)。

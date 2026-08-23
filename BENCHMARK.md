@@ -6,14 +6,14 @@ The evaluator never downloads datasets implicitly. Before training or evaluation
 generate the normalized local JSONL files explicitly from the repository root:
 
 ```bash
-python -m reward_harness.prepare_data --benchmarks rewardbench rewardbench2 rmbench
+python -m reward_harness.prepare_data --benchmarks helpsteer3 rewardbench rmbench
 ```
 
 If the original Hugging Face/raw files are already cached, prohibit network access:
 
 ```bash
 python -m reward_harness.prepare_data \
-  --benchmarks rewardbench rewardbench2 rmbench \
+  --benchmarks helpsteer3 rewardbench rmbench \
   --offline
 ```
 
@@ -32,14 +32,14 @@ bash start_vllm_4gpu.sh
 默认使用 DP=4、TP=1，让每张 GPU 各运行一个 Qwen3-8B 副本，以提高全量评测吞吐。
 如果单卡显存无法容纳 BF16 权重，按脚本末尾说明改成 DP=1、TP=4。
 
-服务健康后运行 benchmark，并自动评测 `agents/` 下的所有 agent。批量脚本目前默认
-运行 RewardBench 2 与 RM-Bench；原版 RewardBench 可通过 CLI 显式加入：
+服务健康后运行 benchmark，并自动评测 `agents/` 下的所有 agent。仓库脚本默认
+运行 RewardBench；RM-Bench 可通过 CLI 显式加入（rewardbench2 暂不评测）：
 
 ```bash
-bash run_reward_benchmarks_vllm.sh
+bash run_benchmark.sh
 
 python -m reward_harness.benchmark \
-  --benchmarks rewardbench \
+  --benchmarks rewardbench rmbench \
   --smoke-per-group 0
 ```
 
@@ -50,7 +50,7 @@ python -m reward_harness.benchmark \
 
 ```bash
 python -m reward_harness.benchmark \
-  --benchmarks rewardbench2 rmbench \
+  --benchmarks rmbench \
   --smoke-per-group 0
 ```
 
@@ -58,7 +58,7 @@ python -m reward_harness.benchmark \
 完整评测需要显式传入 `--smoke-per-group 0`。无需再传 `--resume`，续跑和完整结果跳过
 均已自动启用。
 
-test 分支使用 winner-only 协议，当前只支持 RewardBench 的两个候选。可选择三个具体 Harness：
+test 分支使用 winner-only 协议，可选择三个具体 Harness：
 `no_rubric`、`no_skill` 和 `init_skill`。它们分别使用用户提供的 Eval-Skill
 `evaluation.py` 中 vanilla、rubric 和 skill pairwise Prompt，并直接输出唯一 winner。
 
@@ -108,18 +108,21 @@ results/{run_tag}/{benchmark}/{harness}/{model}/
 - `trajectories.jsonl`：唯一的完整轨迹文件。每行独立包含 Query、Responses、
   evaluator-only gold、Harness metadata、Rubrics、WinnerResult、完整模型请求响应、
   token、延迟、错误及 benchmark 单题结果；多次 trial 时额外包含 `trial_index`。
-- `summary.json`：顶层是 Average@N 指标，`trials` 保留每轮独立指标，`voting_at_n` 保存各轮最高分回答投票后的指标，并包含错误数量、token/延迟汇总和轨迹文件路径。
+- `summary.json`：`primary_metrics` 保存 Average@N 关键指标，`metrics` 保存其余指标，`trials` 保留每轮结果，`voting` 保存 Voting@N，并通过 `counts`、`usage`、`artifacts` 保存计数、开销和轨迹路径。
 - `config.json`：脱敏模型配置、agent 文件及 SHA-256、数据目录和结果路径。
 
 每个 summary 最前面提供统一关键指标，并保留原有明细：
 
 - RewardBench：`beyond_rubric` 与 `auto_rubric` 均为 Chat、Chat Hard、Safety、Reasoning 四个 section 的宏平均；
-- RewardBench 2：`beyond_rubric` 为排除 Ties 后的 subset 宏平均，`auto_rubric` 为包含 Ties 的 subset 样本数加权平均；
+- RewardBench 2：数据可以离线准备，但当前 runner 暂不注册该 adapter，也不计算其指标；
 - RM-Bench：先在每个 domain 内平均 3×3 比较矩阵；`beyond_rubric` 为四个 domain 的宏平均，`auto_rubric` 为四个 domain 按样本数加权的平均。
 
 Runner 会先移除原始 Response ID/metadata，并按内容稳定重排全部回答，再将同一组匿名
 Responses 交给 `build_rubrics()` 和 `judge()`。Judge 一次看到完整 A/B 并返回唯一
 `WinnerResult`；evaluator 随后映射回原始 ID，gold 从不进入模型 Prompt。
+
+RM-Bench 每个原始6回答 prompt 会展开成9个 chosen/rejected pair；每个 pair 调用一次 Judge，汇总时按 original case ID 重建3×3矩阵。因此全量1,327个 prompt 对应11,943个评测 case。
+对 RM-Bench 使用 `--sample-size N` 时，N 表示原始 prompt 数量；runner 会为每个被抽中的 prompt 保留完整9个 pair。
 所有 rubric/judge 请求共同受 `--request-workers` 限流。成功响应按 Prompt 哈希
 缓存在 `results/{run_tag}/.llm_cache/`，断点后可以复用；`trial-num` 大于 1 时关闭 Rubric/Judge 缓存，保证每轮真正重新请求。JSON 解析或接口校验失败时，
 只清除当前线程对应的坏缓存并重新请求。

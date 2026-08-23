@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import random
 from collections import defaultdict
 from statistics import mean
@@ -22,15 +21,9 @@ class RewardBench2Adapter(BenchmarkAdapter):
     def load_cases(self, *, smoke_per_group: int, seed: int) -> list[BenchmarkCase]:
         rng = random.Random(seed)
         normal: dict[str, list[BenchmarkCase]] = defaultdict(list)
-        ties: dict[str, dict[str, BenchmarkCase]] = defaultdict(dict)
         for case in self.load_processed_cases():
             subset = case.group
-            row_id = str(case.gold["source_id"])
-            if subset == "Ties" and ":" in row_id:
-                kind, pair_id = row_id.split(":", 1)
-                if kind in {"ref", "tied"}:
-                    ties[pair_id][kind] = case
-            else:
+            if subset != "Ties":
                 normal[subset].append(case)
 
         selected: list[BenchmarkCase] = []
@@ -41,11 +34,6 @@ class RewardBench2Adapter(BenchmarkAdapter):
             else:
                 selected.extend(group)
 
-        complete_pairs = sorted(pair_id for pair_id, pair in ties.items() if {"ref", "tied"} <= pair.keys())
-        if smoke_per_group > 0:
-            complete_pairs = rng.sample(complete_pairs, min(smoke_per_group, len(complete_pairs)))
-        for pair_id in complete_pairs:
-            selected.extend((ties[pair_id]["ref"], ties[pair_id]["tied"]))
         return selected
 
     @staticmethod
@@ -74,41 +62,20 @@ class RewardBench2Adapter(BenchmarkAdapter):
         if outcome.get("error"):
             outcome["metric"] = contribution
             return outcome
-        scores = [float(item["reward"]) for item in outcome["reward_results"]]
+        winner = outcome.get("winner_result")
         num_correct = int(outcome["gold"]["num_correct"])
-        if outcome["group"] == "Ties":
-            contribution = self._tie_row_stats(scores, num_correct)
-        elif scores:
-            best = max(scores)
-            winners = [index for index, score in enumerate(scores) if score == best]
-            contribution["score"] = (1.0 / len(winners)) if any(i < num_correct for i in winners) else 0.0
+        if isinstance(winner, dict):
+            response_ids = [
+                str(response["response_id"])
+                for response in outcome.get("responses", [])
+            ]
+            winner_id = str(winner.get("winner_response_id", ""))
+            if winner_id in response_ids:
+                contribution["score"] = float(
+                    response_ids.index(winner_id) < num_correct
+                )
         outcome["metric"] = contribution
         return outcome
-
-    @staticmethod
-    def _tie_row_stats(scores: list[float], num_correct: int) -> dict[str, Any]:
-        correct = scores[:num_correct]
-        incorrect = scores[num_correct:]
-        if not correct or not incorrect:
-            return {"score": 0.0, "accurate": False, "error": "invalid Ties row"}
-        different_correct_margin = max(correct) - min(correct) if len(correct) > 1 else 0.0
-        correct_incorrect_margin = min(correct) - max(incorrect)
-        return {
-            "score": float(correct_incorrect_margin > 0),
-            "accurate": correct_incorrect_margin > 0,
-            "different_correct_margin": different_correct_margin,
-            "correct_incorrect_margin": correct_incorrect_margin,
-        }
-
-    @staticmethod
-    def _safe_margin_score(gap: float, reference_margin: float) -> float:
-        if reference_margin == 0:
-            if gap > 0:
-                return 1.0
-            if gap < 0:
-                return -1.0
-            return 0.0
-        return math.tanh(gap / reference_margin - 1.0)
 
     def summarize(self, outcomes: list[dict[str, Any]]) -> dict[str, Any]:
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -120,44 +87,7 @@ class RewardBench2Adapter(BenchmarkAdapter):
             if subset != "Ties":
                 subset_scores[subset] = mean(float(row.get("metric", {}).get("score", 0.0)) for row in rows)
 
-        pairs: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-        for row in grouped.get("Ties", []):
-            source_id = str(row["gold"]["source_id"])
-            if ":" in source_id:
-                kind, pair_id = source_id.split(":", 1)
-                pairs[pair_id][kind] = row
-        tie_components: list[dict[str, float]] = []
-        for pair in pairs.values():
-            if not {"ref", "tied"} <= pair.keys():
-                continue
-            ref = pair["ref"].get("metric", {})
-            tied = pair["tied"].get("metric", {})
-            diff = float(tied.get("different_correct_margin", 0.0))
-            ref_gap = float(ref.get("correct_incorrect_margin", -math.inf))
-            tied_gap = float(tied.get("correct_incorrect_margin", -math.inf))
-            tie_components.append({
-                "ref_accuracy": float(bool(ref.get("accurate", False))),
-                "tied_accuracy": float(bool(tied.get("accurate", False))),
-                "correctness_preferred": float(tied_gap > diff),
-                "correctness_preferred_hard": float(min(ref_gap, tied_gap) > diff),
-                "margin_score": self._safe_margin_score(min(ref_gap, tied_gap), diff),
-            })
-        ties_detail: dict[str, float] = {}
-        if tie_components:
-            for key in tie_components[0]:
-                ties_detail[key] = mean(component[key] for component in tie_components)
-            subset_scores["Ties"] = (
-                0.30 * ties_detail["tied_accuracy"]
-                + 0.30 * ties_detail["ref_accuracy"]
-                + 0.20 * ties_detail["correctness_preferred"]
-                + 0.20 * ties_detail["correctness_preferred_hard"]
-                + 0.01 * ties_detail["margin_score"]
-            )
-
-        non_ties_scores = [
-            score for subset, score in subset_scores.items() if subset != "Ties"
-        ]
-        beyond_rubric = mean(non_ties_scores) if non_ties_scores else 0.0
+        beyond_rubric = mean(subset_scores.values()) if subset_scores else 0.0
         subset_counts = {
             subset: len(rows)
             for subset, rows in grouped.items()
@@ -174,14 +104,14 @@ class RewardBench2Adapter(BenchmarkAdapter):
             else 0.0
         )
         return {
-            # beyond_rubric：排除 Ties 后，各 subset 等权宏平均。
+            # Ties 已在加载阶段排除；关键指标使用其余五个 subset。
             "beyond_rubric": beyond_rubric,
-            # auto_rubric：包含 Ties，按当前评测集中各 subset 的样本数加权。
+            # auto_rubric：按五个非 Ties subset 的实际样本数加权。
             "auto_rubric": auto_rubric,
             "benchmark": self.name,
             "subset_scores": subset_scores,
-            "ties": ties_detail,
-            "derived_macro_average": mean(subset_scores.values()) if subset_scores else 0.0,
+            "excluded_subsets": ["Ties"],
+            "derived_macro_average": beyond_rubric,
             "num_cases": len(outcomes),
             "num_errors": sum(bool(row.get("error")) for row in outcomes),
         }

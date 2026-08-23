@@ -61,10 +61,12 @@ def _usable_summary(
     if (
         isinstance(value, dict)
         and value.get("status") == "complete"
-        and value.get("num_cases") == expected_cases
-        and value.get("trial_num", 1) == expected_trials
-        and isinstance(value.get("voting_at_n"), dict)
-        and value.get("result_protocol") == "winner"
+        and isinstance(value.get("counts"), dict)
+        and value["counts"].get("cases") == expected_cases
+        and isinstance(value.get("trials"), list)
+        and len(value["trials"]) == expected_trials
+        and isinstance(value.get("voting"), dict)
+        and value["voting"].get("n") == expected_trials
     ):
         return value
     return None
@@ -189,6 +191,23 @@ def _sample_cases(
     cases: list[BenchmarkCase], sample_size: int, seed: int
 ) -> list[BenchmarkCase]:
     """对 adapter 产出的全部样本做可复现的全局随机抽样。"""
+
+    # RM-Bench 的一个原始 prompt 被展开成9个 pair；抽样时必须整组保留。
+    if cases and all("original_case_id" in case.gold for case in cases):
+        grouped: dict[str, list[BenchmarkCase]] = {}
+        for case in cases:
+            grouped.setdefault(str(case.gold["original_case_id"]), []).append(case)
+        if sample_size <= 0 or sample_size >= len(grouped):
+            return cases
+        selected_ids = set(
+            random.Random(seed).sample(list(grouped), sample_size)
+        )
+        return [
+            case
+            for original_id, group in grouped.items()
+            if original_id in selected_ids
+            for case in group
+        ]
 
     if sample_size <= 0 or sample_size >= len(cases):
         return cases
@@ -329,41 +348,74 @@ def _summarize_trials(
 ) -> dict[str, Any]:
     """每轮独立计算官方指标，再对 N 轮指标做算术平均。"""
 
-    trials = []
+    raw_trials = []
     for trial_index in range(trial_num):
         rows = [
             row
             for row in outcomes
             if int(row.get("trial_index", 0)) == trial_index
         ]
-        trials.append(
+        raw_trials.append(
             {"trial_index": trial_index, **adapter.summarize(rows)}
         )
 
     averaged = _mean_summary_values(
         [
             {key: value for key, value in summary.items() if key != "trial_index"}
-            for summary in trials
+            for summary in raw_trials
         ]
     )
     if not isinstance(averaged, dict):
         raise TypeError("benchmark adapter summary must be a dictionary")
-    averaged["trial_num"] = trial_num
-    averaged["trials"] = trials
     voting_outcomes = [
         adapter.score_outcome(outcome)
         for outcome in _build_voting_outcomes(outcomes, trial_num)
     ]
-    averaged["voting_at_n"] = {
-        "n": trial_num,
-        **adapter.summarize(voting_outcomes),
+    raw_voting = adapter.summarize(voting_outcomes)
+
+    def organize(raw: dict[str, Any]) -> dict[str, Any]:
+        """把 adapter 输出拆成关键指标、其他指标和计数。"""
+
+        primary_metrics = {
+            key: raw[key]
+            for key in ("beyond_rubric", "auto_rubric")
+            if key in raw
+        }
+        ignored = {
+            "benchmark",
+            "beyond_rubric",
+            "auto_rubric",
+            "num_cases",
+            "num_errors",
+            "trial_index",
+        }
+        return {
+            "primary_metrics": primary_metrics,
+            "metrics": {
+                key: value for key, value in raw.items() if key not in ignored
+            },
+            "counts": {
+                "cases": int(raw.get("num_cases", 0) or 0),
+                "errors": int(raw.get("num_errors", 0) or 0),
+            },
+        }
+
+    trials = []
+    for raw in raw_trials:
+        organized = organize(raw)
+        trials.append({"trial_index": raw["trial_index"], **organized})
+
+    return {
+        "benchmark": adapter.name,
+        **organize(averaged),
+        "trials": trials,
+        "voting": {"n": trial_num, **organize(raw_voting)},
+        "counts": {
+            "cases": len({str(row["case_id"]) for row in outcomes}),
+            "evaluations": len(outcomes),
+            "errors": sum(bool(row.get("error")) for row in outcomes),
+        },
     }
-    averaged["num_cases"] = len(
-        {str(row["case_id"]) for row in outcomes}
-    )
-    averaged["num_evaluations"] = len(outcomes)
-    averaged["num_errors"] = sum(bool(row.get("error")) for row in outcomes)
-    return averaged
 
 
 def _run_one_case(
@@ -558,14 +610,23 @@ def run_configuration(
                     flush=True,
                 )
 
-    summary = _summarize_trials(adapter, existing, trial_num)
-    summary["result_protocol"] = "winner"
-    summary["agent"] = harness.name
-    summary["status"] = "complete"
-    summary["trajectory_path"] = str(trajectories_path.resolve())
-    summary["usage"] = {
-        key: sum(float(row.get("usage", {}).get(key, 0)) for row in existing)
-        for key in ("input_tokens", "output_tokens", "latency_ms")
+    aggregated = _summarize_trials(adapter, existing, trial_num)
+    summary = {
+        "status": "complete",
+        "benchmark": aggregated["benchmark"],
+        "harness": harness.name,
+        "primary_metrics": aggregated["primary_metrics"],
+        "metrics": aggregated["metrics"],
+        "trials": aggregated["trials"],
+        "voting": aggregated["voting"],
+        "counts": aggregated["counts"],
+        "usage": {
+            key: sum(float(row.get("usage", {}).get(key, 0)) for row in existing)
+            for key in ("input_tokens", "output_tokens", "latency_ms")
+        },
+        "artifacts": {
+            "trajectories": str(trajectories_path.resolve()),
+        },
     }
     config["status"] = "complete"
     _write_json(run_directory / "config.json", config)
@@ -689,10 +750,16 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
-    unsupported_benchmarks = sorted(set(args.benchmarks) - {"rewardbench"})
+    supported_pairwise = {
+        "held_in",
+        "validation",
+        "rewardbench",
+        "rmbench",
+    }
+    unsupported_benchmarks = sorted(set(args.benchmarks) - supported_pairwise)
     if unsupported_benchmarks:
         print(
-            "The winner-only test branch currently supports RewardBench only; "
+            "The winner-only runner currently supports pairwise datasets only; "
             f"unsupported: {unsupported_benchmarks}",
             file=sys.stderr,
         )

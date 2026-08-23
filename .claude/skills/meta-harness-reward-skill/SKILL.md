@@ -36,11 +36,11 @@ Good candidates change a mechanism:
 - A new skill bank organization.
 - A new rubric-generation workflow.
 - A new judge-skill-selection strategy.
-- Response-set-aware rubric discovery that remains pointwise-applicable.
+- Response-set-aware rubric discovery that improves head-to-head discrimination.
 - Global rubric vs hard-constraint separation.
 - Better uncertainty, tie, or hard-failure handling.
 - Stronger evidence-first scoring.
-- Aggregation that handles hard constraints or severe failures.
+- Winner selection that handles hard constraints, severe failures, or near ties.
 - Stage-specific skills for rubric generation vs rubric evaluation.
 
 Each candidate should test one primary hypothesis. Avoid adding unrelated "and also" changes in the same file.
@@ -77,51 +77,44 @@ class RewardSystem(ABC):
         responses: tuple[Response, ...],
     ) -> RubricSet: ...
 
-    def score(
+    def judge(
         self,
         task: Query,
-        candidate: Response,
+        responses: tuple[Response, ...],
         rubrics: RubricSet,
-    ) -> JudgmentResult: ...
-
-    def aggregate(
-        self,
-        task: Query,
-        candidate: Response,
-        rubrics: RubricSet,
-        judgment_result: JudgmentResult,
-    ) -> RewardResult: ...
+    ) -> WinnerResult: ...
 
     def _task_payload(task: Query) -> dict[str, JSONValue]: ...
     def _candidate_payload(candidate: Response) -> dict[str, JSONValue]: ...
     def _responses_payload(responses: tuple[Response, ...]) -> list[dict[str, JSONValue]]: ...
+    def _judge_responses_payload(responses: tuple[Response, ...]) -> list[dict[str, JSONValue]]: ...
     def _rubrics_payload(rubrics: RubricSet) -> list[dict[str, JSONValue]]: ...
     def _skills_payload(skills: tuple[Skill, ...]) -> list[dict[str, JSONValue]]: ...
     def _parse_skill_calls(raw_response: str, registry: SkillRegistry) -> tuple[str, ...]: ...
     def _parse_rubrics(raw_response: str) -> tuple[Rubric, ...]: ...
     def _parse_judgments(raw_response: str, rubrics: RubricSet) -> tuple[RubricJudgment, ...]: ...
     def _validate_rubric_set(self, task: Query, rubrics: RubricSet) -> None: ...
-    def _validate_judgment_result(task: Query, candidate: Response, rubrics: RubricSet, result: JudgmentResult) -> None: ...
-    def _validate_reward_result(task: Query, candidate: Response, result: RewardResult) -> None: ...
+    def _validate_winner_result(task: Query, responses: tuple[Response, ...], result: WinnerResult) -> None: ...
 ```
 
 Extend `RewardSystem` from `..reward_system`
-Import `LLMCallable`, `Query`, `Response`, `Rubric`, `RubricSet`, `Skill`, `SkillStage`, `SkillRegistry`, `RubricJudgment`, `JudgmentResult`, and `RewardResult` from `..reward_system`
-`Skill` requires `name`, `stage`, `description`, and `content`; stage must be `"G"`, `"J"`, or `"A"`
-Use `registry.for_stage("G")`, `registry.for_stage("J")`, or `registry.for_stage("A")` before skill selection when a stage-specific skill pool is needed
+Import `LLMCallable`, `Query`, `Response`, `Rubric`, `RubricSet`, `Skill`, `SkillStage`, `SkillRegistry`, and `WinnerResult` from `..reward_system`
+`Skill` requires `name`, `stage`, `description`, and `content`; stage must be `"G"` or `"J"`
+Use `registry.for_stage("G")` or `registry.for_stage("J")` before skill selection when a stage-specific skill pool is needed
 Use `self._task_payload(task)` for public task payloads
 Use `self._candidate_payload(candidate)` for single-response judge payloads
 Use `self._responses_payload(responses)` for anonymized response-set payloads in rubric generation (NOT custom payloads with IDs or labels)
+Use `self._judge_responses_payload(responses)` when a structured comparative Judge payload is needed
 Use `self._rubrics_payload(rubrics)` for judge-visible rubric payloads
 Use `self._skills_payload(selected_skills)` for selected skill payloads
 Use `self._parse_skill_calls(response, registry)` for skill selection parsing (NOT custom regex)
 Use `self._parse_rubrics(response)` for rubric extraction (NOT custom regex)
 Use `self._parse_judgments(response, rubrics)` for judgment extraction (NOT custom regex)
-Do NOT override `_task_payload`, `_candidate_payload`, `_responses_payload`, `_rubrics_payload`, `_skills_payload`, `_parse_skill_calls`, `_parse_rubrics`, `_parse_judgments`, `_validate_rubric_set`, `_validate_judgment_result`, or `_validate_reward_result`
-The benchmark/evaluator calls `_validate_rubric_set`, `_validate_judgment_result`, and `_validate_reward_result`; candidates should satisfy these checks rather than bypass them
+Do NOT override `_task_payload`, `_candidate_payload`, `_responses_payload`, `_judge_responses_payload`, `_rubrics_payload`, `_skills_payload`, `_parse_skill_calls`, `_parse_rubrics`, `_parse_judgments`, `_validate_rubric_set`, or `_validate_winner_result`
+The benchmark/evaluator calls `_validate_rubric_set` and `_validate_winner_result`; candidates should satisfy these checks rather than bypass them
 Use `self.rubric_llm(prompt)` for rubric generation calls (NOT `self._rubric_llm` directly)
-Use `self.judge_llm(prompt)` for response scoring calls (NOT `self._judge_llm` directly)
-`build_rubrics` and `score` must work without any prior learning (cold start)
+Use `self.judge_llm(prompt)` for comparative judging calls (NOT `self._judge_llm` directly)
+`build_rubrics` and `judge` must work without any prior learning (cold start)
 
 ## Workflow
 
@@ -158,7 +151,7 @@ For each of the 3 candidates:
 
 1. Copy a top-performing base harness to `reward_harness/agents/<name>.py`, then make targeted modifications. This copy-then-edit approach ensures correct imports and proven patterns.
 2. Implement the new mechanism according to your hypothesis.
-3. Self-critique (mandatory): After implementing, re-read the file and check: does this harness introduce a genuinely NEW mechanism, or is it just a parameter variant? If the logic in `get_skill_registry()`, `build_rubrics()`, `score()`, and `aggregate()` is identical to the base except for constants, REWRITE with a truly novel mechanism.
+3. Self-critique (mandatory): After implementing, re-read the file and check: does this harness introduce a genuinely NEW mechanism, or is it just a parameter variant? If the logic in `get_skill_registry()`, `build_rubrics()`, and `judge()` is identical to the base except for constants, REWRITE with a truly novel mechanism.
 4. Validate:
 
 ```bash
@@ -195,9 +188,9 @@ CANDIDATES: <name1>, <name2>, <name3>
 
 ## Current Baselines
 
-- `no_rubric.py`: no rubric generation; direct scalar reward.
-- `no_skill.py`: generates shared binary rubrics from the public query and anonymized unlabeled response set, then scores responses without workflow skill selection.
-- `init_skill.py`: selects stage-specific workflow skills for rubric generation (`G`) and pointwise scoring (`J`).
+- `no_rubric.py`: no rubric generation; vanilla pairwise forced-choice Judge.
+- `no_skill.py`: generates a query-specific rubric, then performs rubric-guided pairwise forced-choice without a Skill.
+- `init_skill.py`: injects an editable J-stage evaluation Skill into pairwise forced-choice judging.
 
 Usually build candidates from `init_skill.py` unless the task prompt gives a different base.
 

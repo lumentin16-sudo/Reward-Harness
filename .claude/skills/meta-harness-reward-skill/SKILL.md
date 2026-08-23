@@ -26,7 +26,7 @@ The most common failure mode is creating systems that are just parameter variant
 Bad candidates only tune surface constants:
 
 - Changing "2 to 6 rubrics" to "3 to 7 rubrics" without a mechanism change.
-- Changing score ranges without a new scoring rationale.
+- Changing winner parsing or confidence wording without a new judging rationale.
 - Renaming skills without changing their function.
 - Reordering prompt bullets.
 - Adding generic phrases such as "be careful" or "think deeply".
@@ -41,7 +41,7 @@ Good candidates change a mechanism:
 - Better uncertainty, tie, or hard-failure handling.
 - Stronger evidence-first scoring.
 - Winner selection that handles hard constraints, severe failures, or near ties.
-- Stage-specific skills for rubric generation vs rubric evaluation.
+- Stage-specific skills for rubric generation vs pairwise judging.
 
 Each candidate should test one primary hypothesis. Avoid adding unrelated "and also" changes in the same file.
 

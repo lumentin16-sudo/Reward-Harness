@@ -1,4 +1,4 @@
-"""HelpSteer3 held-in 与 validation 偏好数据适配器。"""
+"""HelpSteer3 单一 held-in 搜索集适配器。"""
 
 from __future__ import annotations
 
@@ -62,14 +62,7 @@ class _HelpSteer3Adapter(BenchmarkAdapter):
 
 
 class HeldInAdapter(_HelpSteer3Adapter):
-    """供 Codex 分析和原型学习的 900 条 held-in 数据。"""
+    """同时用于 Harness 搜索评分与轨迹分析的 500 条数据。"""
 
     name = "held_in"
     split = "train"
-
-
-class ValidationAdapter(_HelpSteer3Adapter):
-    """用于 Harness frontier 选择的 100 条 validation 数据。"""
-
-    name = "validation"
-    split = "validation"

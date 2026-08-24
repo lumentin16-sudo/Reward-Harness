@@ -16,14 +16,7 @@ benchmark:
   base_url: http://127.0.0.1:8000/v1
   model: Qwen/Qwen3-8B
   benchmarks:
-    - validation
-  # 候选先在 selection_benchmarks 上筛选；只有晋级者再跑 held_in。
-  # 三个 baseline 例外：全部生成 held_in 轨迹，供第一轮 Codex 对比。
-  selection_benchmarks:
-    - validation
-  # validation 分数 > (最佳 baseline - margin) 即晋级跑 held_in。
-  # margin=0 表示必须严格超过最佳 baseline。
-  promotion_margin: 2
+    - held_in
   baselines:
     - no_rubric
     - no_skill
@@ -48,7 +41,6 @@ paths:
 
 datasets:
   held_in: held_in
-  validation: validation
   held_out:
     - rewardbench
     - rmbench

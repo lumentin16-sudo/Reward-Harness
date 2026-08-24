@@ -752,7 +752,6 @@ def main(argv: list[str] | None = None) -> int:
 
     supported_pairwise = {
         "held_in",
-        "validation",
         "rewardbench",
         "rmbench",
     }

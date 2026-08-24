@@ -7,7 +7,7 @@ RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 # reward_harness.benchmark 参数说明：
 #   --base-url          vLLM 的 OpenAI-compatible API 地址。
 #   --model             vLLM 暴露的模型名称。
-#   --benchmarks        可选 rewardbench、rmbench、held_in、validation；暂不评测 rewardbench2。
+#   --benchmarks        可选 rewardbench、rmbench、held_in；暂不评测 rewardbench2。
 #   --agents            可选 no_rubric、no_skill、init_skill。
 #   --agents-dir        自定义 Agent 文件目录。
 #   --workers           同时处理的 benchmark case 数量。

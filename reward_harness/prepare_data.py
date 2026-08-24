@@ -200,26 +200,22 @@ def _prepare_helpsteer3(
     *,
     force: bool,
     offline: bool,
-    held_in_size: int = 900,
-    validation_size: int = 100,
+    held_in_size: int = 500,
     helpsteer3_seed: int = 42,
     **_: Any,
-) -> list[tuple[Path, Path]]:
-    """按四个 domain 均衡、互斥地抽取 held-in 与 validation。"""
+) -> tuple[Path, Path]:
+    """从四个 domain 均衡抽取单一 held-in 搜索集。"""
 
-    if held_in_size <= 0 or validation_size <= 0:
-        raise ValueError("HelpSteer3 split sizes must be positive")
-    if held_in_size % 4 or validation_size % 4:
-        raise ValueError("HelpSteer3 split sizes must be divisible by 4 domains")
+    if held_in_size <= 0 or held_in_size % 4:
+        raise ValueError("HelpSteer3 held-in size must be positive and divisible by 4")
     held_per_domain = held_in_size // 4
-    validation_per_domain = validation_size // 4
-    target_per_domain = held_per_domain + validation_per_domain
 
     rows, fingerprint = _iter_helpsteer3_rows(offline=offline)
     reservoirs: dict[str, list[tuple[int, dict[str, Any]]]] = {
         domain: [] for domain in HELPSTEER3_DOMAINS
     }
     seen = {domain: 0 for domain in HELPSTEER3_DOMAINS}
+    seen_contents: set[tuple[str, str, str]] = set()
     rngs = {
         domain: random.Random(f"{helpsteer3_seed}:{domain}")
         for domain in HELPSTEER3_DOMAINS
@@ -234,56 +230,47 @@ def _prepare_helpsteer3(
             or not public_text(row.get("response2", "")).strip()
         ):
             continue
+        content_key = (
+            public_text(row["context"]),
+            public_text(row["response1"]),
+            public_text(row["response2"]),
+        )
+        if content_key in seen_contents:
+            continue
+        seen_contents.add(content_key)
         seen[domain] += 1
         reservoir = reservoirs[domain]
         item = (source_index, row)
-        if len(reservoir) < target_per_domain:
+        if len(reservoir) < held_per_domain:
             reservoir.append(item)
             continue
         replacement = rngs[domain].randrange(seen[domain])
-        if replacement < target_per_domain:
+        if replacement < held_per_domain:
             reservoir[replacement] = item
 
     held_in_cases: list[BenchmarkCase] = []
-    validation_cases: list[BenchmarkCase] = []
     for domain in HELPSTEER3_DOMAINS:
         selected = reservoirs[domain]
-        if len(selected) != target_per_domain:
+        if len(selected) != held_per_domain:
             raise ValueError(
                 f"HelpSteer3 domain {domain!r} has only {len(selected)} usable rows"
             )
         rngs[domain].shuffle(selected)
         held_in_cases.extend(
             _helpsteer3_case(row, index)
-            for index, row in selected[:held_per_domain]
-        )
-        validation_cases.extend(
-            _helpsteer3_case(row, index)
-            for index, row in selected[held_per_domain:]
+            for index, row in selected
         )
 
     random.Random(helpsteer3_seed).shuffle(held_in_cases)
-    random.Random(helpsteer3_seed + 1).shuffle(validation_cases)
-    return [
-        write_processed_cases(
-            data_root,
-            benchmark="held_in",
-            dataset_id=HELPSTEER3_DATASET_ID,
-            split="train",
-            cases=held_in_cases,
-            source_fingerprint=fingerprint,
-            force=force,
-        ),
-        write_processed_cases(
-            data_root,
-            benchmark="validation",
-            dataset_id=HELPSTEER3_DATASET_ID,
-            split="validation",
-            cases=validation_cases,
-            source_fingerprint=fingerprint,
-            force=force,
-        ),
-    ]
+    return write_processed_cases(
+        data_root,
+        benchmark="held_in",
+        dataset_id=HELPSTEER3_DATASET_ID,
+        split="train",
+        cases=held_in_cases,
+        source_fingerprint=fingerprint,
+        force=force,
+    )
 
 
 PREPARERS: dict[str, Callable[..., Any]] = {
@@ -304,8 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=sorted(PREPARERS),
     )
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_ROOT)
-    parser.add_argument("--held-in-size", type=int, default=900)
-    parser.add_argument("--validation-size", type=int, default=100)
+    parser.add_argument("--held-in-size", type=int, default=500)
     parser.add_argument("--helpsteer3-seed", type=int, default=42)
     parser.add_argument(
         "--offline",
@@ -328,7 +314,6 @@ def main(argv: list[str] | None = None) -> int:
         if name == "helpsteer3":
             prepare_kwargs.update(
                 held_in_size=args.held_in_size,
-                validation_size=args.validation_size,
                 helpsteer3_seed=args.helpsteer3_seed,
             )
         prepared = PREPARERS[name](data_root, **prepare_kwargs)

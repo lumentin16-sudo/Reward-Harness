@@ -78,11 +78,10 @@ data/{benchmark}/{split}.manifest.json
 
 manifest 会记录数据条数、来源 fingerprint 和内容 SHA-256，用于校验数据完整性与生成可复现的运行签名。
 
-HelpSteer3 使用 `preference/train` 中四个 domain 的非平局样本做均衡互斥抽样：
+HelpSteer3 使用 `preference/train` 中四个 domain 的非平局样本做均衡随机抽样：
 
 ```text
-data/held_in/train.jsonl             900 条，每域 225 条
-data/validation/validation.jsonl     100 条，每域 25 条
+data/held_in/train.jsonl             500 条，每域 125 条
 ```
 
 `overall_preference < 0` 表示原 Response 1 胜，`> 0` 表示 Response 2 胜；本地格式始终把 chosen 放在 `candidate_000`，原始偏好强度和 annotator reasoning 保存在 evaluator-only gold。
@@ -311,7 +310,7 @@ API 请求或 JSON/schema 解析在重试后仍失败时，该 case 会记录 `e
 ## 常用参数
 
 ```text
---benchmarks       held_in validation rewardbench rmbench（rewardbench2 暂不评测）
+--benchmarks       held_in rewardbench rmbench（rewardbench2 暂不评测）
 --agents           指定 Agent；省略时自动运行 reward_harness/agents/ 下的全部 Agent
 --agents-dir       自定义 Agent 目录
 --workers          题目级并发数，默认 4
@@ -369,14 +368,12 @@ python meta-harness.py --run-name reward-search --status
 
 搜索阶段固定使用 `trial_num=1`，默认优化 `primary_metrics.beyond_rubric`。Average@N 和 Voting@N 应在选出最终 Harness 后，通过独立的正式 benchmark 命令评测。
 
-Harness Optimization 先在 100 条 `validation` 上评测候选并更新 frontier。三个 baseline 都会额外跑完整 `held_in`，为第一轮优化生成对照轨迹；后续每轮所有在 validation 上严格超过最佳 baseline 的候选都会跑 `held_in`，其轨迹供下一轮 Codex 分析。RewardBench 和 RM-Bench 作为 held-out 数据，不参与搜索阶段。
+Harness Optimization 使用单一的 500 条 `held_in` 搜索集。三个 baseline 和每轮所有候选都在同一集合上运行；该集合的指标用于更新 frontier，完整轨迹同时供下一轮 Codex 分析。RewardBench 和 RM-Bench 作为 held-out 数据，不参与搜索阶段。
 
 因此每轮的调用顺序是：
 
 ```text
-生成 3 个候选 → 全部跑 validation → 筛出超过最佳 baseline 的候选
-                                  ├─ 有候选过线：全部晋级者跑 held_in
-                                  └─ 无候选过线：跳过 held_in
+生成 3 个候选 → 全部跑 held_in → 计算搜索分数与完整轨迹 → 更新 frontier
 ```
 
 每个 run 的外循环状态位于：

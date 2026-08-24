@@ -3,8 +3,8 @@
   "benchmark": "held_in",
   "dataset_id": "nvidia/HelpSteer3",
   "split": "train",
-  "num_cases": 900,
-  "content_sha256": "354dbc36e52b4dfea5f2ca0c08de72071f8f5bea53197795d7a8126ecca914ed",
+  "num_cases": 500,
+  "content_sha256": "02dd6fe13f8c2cf4d4833b574ed03de42cd02059ecba1f961e36c66a9975159e",
   "source_fingerprint": "f6d145777bcbde96137596340fab89793acd1031",
-  "generated_at": "2026-08-23T15:35:52.429179+00:00"
+  "generated_at": "2026-08-24T16:52:09.472507+00:00"
 }

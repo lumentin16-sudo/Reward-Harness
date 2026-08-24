@@ -129,7 +129,7 @@ Check the reports directory (path in the task prompt's "Run directories" section
 1. Read all state files:
 
    * `evolution_summary.jsonl` — what's been tried (one JSON per candidate)
-   * `frontier_val.json` — current best per benchmark (validation metric)
+   * `frontier_val.json` — current best on the held-in search metric
    * task prompt benchmark command/config for current benchmarks and baselines
    * recent `results/<run_tag>/<benchmark>/<harness>/<model>/trajectories.jsonl` traces if they exist
 2. Formulate 3 hypotheses — each must be falsifiable and target a different mechanism.

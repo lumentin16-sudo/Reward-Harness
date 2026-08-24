@@ -204,7 +204,7 @@ def _task_prompt(
         f"## Run context\n"
         f"- Run root: `{paths.root}`\n"
         f"- Configuration: `{args.config}`\n"
-        f"- Held-in training dataset: `{args.held_in_dataset}` "
+        f"- Held-in search dataset: `{args.held_in_dataset}` "
         f"at `{held_in_directory}`\n"
         f"- Held-out benchmarks (do NOT inspect their data or traces during "
         f"search): {', '.join(args.held_out_benchmarks)}.\n\n"
@@ -479,12 +479,11 @@ def _evaluate(
                 scores[benchmark] = 0.0
             counts = summary.get("counts", {}) if isinstance(summary, dict) else {}
             errors += int(counts.get("errors", 0) or 0) if isinstance(counts, dict) else 0
-        selection = [b for b in args.selection_benchmarks if b in scores]
         evaluated[agent] = {
             "scores": scores,
             "avg_val": (
-                sum(scores[b] for b in selection) / len(selection)
-                if selection
+                sum(scores.values()) / len(scores)
+                if scores
                 else 0.0
             ),
             "num_errors": errors,
@@ -498,66 +497,6 @@ def _evaluate(
     return evaluated
 
 
-def _promoted_candidates(
-    results: dict[str, dict[str, Any]],
-    baseline_best: float,
-    margin: float = 0.0,
-) -> list[str]:
-    """validation 分数超过（最佳 baseline − margin）的候选都可晋级生成 held-in 轨迹。"""
-
-    threshold = baseline_best - margin
-    promoted = []
-    for name, result in results.items():
-        if result.get("benchmark_returncode") != 0:
-            continue
-        if not all(
-            Path(path).exists() for path in result.get("summary_paths", {}).values()
-        ):
-            continue
-        if float(result.get("avg_val", 0.0)) > threshold:
-            promoted.append(name)
-    return promoted
-
-
-def _baseline_best(paths: RunPaths) -> float:
-    """基线轮（iteration 0）的最高 avg_val；无基线记录时回退到当前 frontier。"""
-
-    scores = [
-        float(row.get("avg_val", 0.0))
-        for row in _read_jsonl(paths.evolution)
-        if row.get("axis") == "baseline"
-    ]
-    if scores:
-        return max(scores)
-    return _frontier_best(_read_json(paths.frontier, {}))
-
-
-def _merge_analysis_result(
-    validation_result: dict[str, Any],
-    held_in_result: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """把晋级候选的 held-in 轨迹位置附加到验证结果，不改变选择分数。"""
-
-    merged = dict(validation_result)
-    merged["scores"] = dict(validation_result.get("scores", {}))
-    merged["summary_paths"] = dict(validation_result.get("summary_paths", {}))
-    merged["benchmark_run_tags"] = dict(
-        validation_result.get("benchmark_run_tags", {})
-    )
-    merged["held_in_evaluated"] = held_in_result is not None
-    if held_in_result is None:
-        return merged
-    merged["scores"].update(held_in_result.get("scores", {}))
-    merged["summary_paths"].update(held_in_result.get("summary_paths", {}))
-    merged["benchmark_run_tags"].update(
-        held_in_result.get("benchmark_run_tags", {})
-    )
-    merged["num_errors"] = int(validation_result.get("num_errors", 0)) + int(
-        held_in_result.get("num_errors", 0)
-    )
-    return merged
-
-
 def _frontier_best(frontier: dict[str, Any]) -> float:
     best = frontier.get("_best", {})
     return float(best.get("avg_val", 0.0)) if isinstance(best, dict) else 0.0
@@ -567,9 +506,8 @@ def _update_frontier(
     paths: RunPaths,
     results: dict[str, dict[str, Any]],
     metric_path: str,
-    held_in_key: str = "held_in",
 ) -> None:
-    """更新 per-benchmark 最佳、validation 冠军（_best）和 held-in 冠军（_best_held_in）。"""
+    """根据单一搜索集分数更新 per-benchmark 和全局最佳 Harness。"""
 
     frontier = _read_json(paths.frontier, {})
     if not isinstance(frontier, dict):
@@ -593,17 +531,6 @@ def _update_frontier(
                 "scores": result["scores"],
                 "run_tag": result["run_tag"],
             }
-        held_in_score = result["scores"].get(held_in_key)
-        if held_in_score is not None:
-            current_held = frontier.get("_best_held_in", {})
-            if not isinstance(current_held, dict) or held_in_score > float(current_held.get("score", -1)):
-                frontier["_best_held_in"] = {
-                    "harness": harness,
-                    "score": held_in_score,
-                    "run_tag": result.get("benchmark_run_tags", {}).get(
-                        held_in_key, result.get("run_tag")
-                    ),
-                }
     frontier["metric_path"] = metric_path
     frontier["updated_at"] = _now()
     _atomic_json(paths.frontier, frontier)
@@ -656,13 +583,6 @@ def _refresh_run_indexes(paths: RunPaths) -> None:
             "base_harness": row.get("base_harness", ""),
             "benchmarks": benchmark_details,
             "num_errors": row.get("num_errors", 0),
-            # 兼容已经产生的旧字段；它实际表示是否获准运行 held-in。
-            "selected_for_held_in": bool(
-                row.get(
-                    "selected_for_held_in",
-                    row.get("promoted_to_frontier", False),
-                )
-            ),
         }
         if row.get("axis") == "baseline":
             summary_index["baselines"][system] = compact
@@ -708,8 +628,6 @@ def _record_results(
             "run_tag": result.get("run_tag"),
             "summary_paths": result.get("summary_paths", {}),
             "benchmark_run_tags": result.get("benchmark_run_tags", {}),
-            "promoted_to_frontier": bool(result.get("promoted_to_frontier", False)),
-            "held_in_evaluated": bool(result.get("held_in_evaluated", False)),
         }
         if index == 0:
             row["timing_s"] = {key: round(value, 3) for key, value in timing.items()}
@@ -718,24 +636,24 @@ def _record_results(
 
 
 def _initialize_baselines(paths: RunPaths, args: argparse.Namespace) -> None:
-    """首次运行时用 validation 建立前沿，并为全部 baseline 生成 held-in 轨迹。"""
+    """首次运行时在单一 held-in 搜索集上评测全部 baseline。"""
 
     if paths.frontier.exists():
         return
     if args.skip_baseline:
         raise RuntimeError("--skip-baseline requires an existing frontier_val.json")
-    print(f"[{_now()}] evaluating baselines on validation: {', '.join(args.baselines)}", flush=True)
-    validation_tag = _safe_tag(f"mh-{args.run_name}-baseline-val")
-    validation_results = _evaluate(
+    print(f"[{_now()}] evaluating baselines: {', '.join(args.baselines)}", flush=True)
+    run_tag = _safe_tag(f"mh-{args.run_name}-baseline-search")
+    results = _evaluate(
         paths,
         args,
         list(args.baselines),
-        validation_tag,
-        args.selection_benchmarks,
+        run_tag,
+        args.benchmarks,
     )
     failed = [
         name
-        for name, result in validation_results.items()
+        for name, result in results.items()
         if result["benchmark_returncode"] != 0
         or any(not Path(path).exists() for path in result["summary_paths"].values())
     ]
@@ -743,37 +661,6 @@ def _initialize_baselines(paths: RunPaths, args: argparse.Namespace) -> None:
         raise RuntimeError(
             f"baseline benchmark failed for {failed}; see {paths.benchmark_logs}"
         )
-    _update_frontier(paths, validation_results, args.metric_path)
-
-    # 三个 baseline 都保留 held-in 轨迹，给第一轮 Codex 提供完整对照材料。
-    print(f"[{_now()}] generating held-in traces for all baselines", flush=True)
-    held_in_tag = _safe_tag(f"mh-{args.run_name}-baseline-held-in")
-    held_in_results = _evaluate(
-        paths,
-        args,
-        list(args.baselines),
-        held_in_tag,
-        (args.held_in_dataset,),
-    )
-    held_in_failed = [
-        name
-        for name, result in held_in_results.items()
-        if result["benchmark_returncode"] != 0
-        or any(not Path(path).exists() for path in result["summary_paths"].values())
-    ]
-    if held_in_failed:
-        raise RuntimeError(
-            f"baseline held-in evaluation failed for {held_in_failed}; "
-            f"see {paths.benchmark_logs}"
-        )
-    results = {
-        name: _merge_analysis_result(
-            validation_result,
-            held_in_results.get(name),
-        )
-        for name, validation_result in validation_results.items()
-    }
-    # 合并 held-in 后补登 per-benchmark 榜和 _best_held_in。
     _update_frontier(paths, results, args.metric_path)
     rows = []
     for name, result in results.items():
@@ -788,13 +675,9 @@ def _initialize_baselines(paths: RunPaths, args: argparse.Namespace) -> None:
                 "delta": None,
                 "outcome": f"{result['avg_val']:.2f}%",
                 "num_errors": result["num_errors"],
-                "run_tag": validation_tag,
+                "run_tag": run_tag,
                 "summary_paths": result["summary_paths"],
                 "benchmark_run_tags": result.get("benchmark_run_tags", {}),
-                "promoted_to_frontier": (
-                    name == _read_json(paths.frontier, {}).get("_best", {}).get("harness")
-                ),
-                "held_in_evaluated": True,
             }
         )
         print(f"  {name}: {result['avg_val']:.2f}%")
@@ -841,7 +724,6 @@ def run_evolution(args: argparse.Namespace) -> int:
     # 旧 run 继续执行时也会自动补齐或重建紧凑索引。
     _refresh_run_indexes(paths)
     start = _iteration(paths) + 1
-    baseline_best = _baseline_best(paths)
     for offset in range(args.iterations):
         if _interrupted:
             break
@@ -876,47 +758,14 @@ def run_evolution(args: argparse.Namespace) -> int:
             return 0
 
         benchmark_started = time.time()
-        validation_tag = _safe_tag(f"mh-{args.run_name}-iter-{iteration:03d}-val")
-        validation_results = _evaluate(
+        run_tag = _safe_tag(f"mh-{args.run_name}-iter-{iteration:03d}-search")
+        results = _evaluate(
             paths,
             args,
             [candidate["name"] for candidate in valid],
-            validation_tag,
-            args.selection_benchmarks,
+            run_tag,
+            args.benchmarks,
         )
-        promoted = _promoted_candidates(
-            validation_results, baseline_best, args.promotion_margin
-        )
-        held_in_results: dict[str, dict[str, Any]] = {}
-        if promoted:
-            print(
-                f"  {len(promoted)} candidate(s) above the promotion threshold; "
-                "generating held-in traces...",
-                flush=True,
-            )
-            held_in_tag = _safe_tag(
-                f"mh-{args.run_name}-iter-{iteration:03d}-held-in"
-            )
-            held_in_results = _evaluate(
-                paths,
-                args,
-                promoted,
-                held_in_tag,
-                (args.held_in_dataset,),
-            )
-        else:
-            print(
-                "  no candidate above the promotion threshold; held-in evaluation skipped",
-                flush=True,
-            )
-        results = {}
-        for name, validation_result in validation_results.items():
-            merged = _merge_analysis_result(
-                validation_result,
-                held_in_results.get(name),
-            )
-            merged["promoted_to_frontier"] = name in promoted
-            results[name] = merged
         benchmark_time = time.time() - benchmark_started
         _record_results(
             paths,
@@ -930,20 +779,12 @@ def run_evolution(args: argparse.Namespace) -> int:
                 "wall": time.time() - propose_started,
             },
         )
-        # _best 只看 validation(avg_val 语义不变);held-in 分数只进入
-        # per-benchmark 榜和 _best_held_in,不参与 validation 冠军判定。
         _update_frontier(paths, results, args.metric_path)
         _refresh_run_indexes(paths)
         for name, evaluation in results.items():
             print(f"  {name}: {evaluation['avg_val']:.2f}%")
         best = _read_json(paths.frontier, {}).get("_best", {})
         print(f"  frontier: {best.get('harness')} @ {float(best.get('avg_val', 0)):.2f}%")
-        best_held = _read_json(paths.frontier, {}).get("_best_held_in", {})
-        if best_held:
-            print(
-                f"  frontier(held_in): {best_held.get('harness')} @ "
-                f"{float(best_held.get('score', 0)):.2f}%"
-            )
 
     return 0
 
@@ -1027,23 +868,6 @@ def build_parser(
         default=list(benchmark_config.get("benchmarks", ["rewardbench"])),
     )
     parser.add_argument(
-        "--selection-benchmarks",
-        nargs="+",
-        default=list(
-            benchmark_config.get(
-                "selection_benchmarks",
-                benchmark_config.get("benchmarks", ["rewardbench"]),
-            )
-        ),
-        help="Benchmarks used for frontier selection (avg_val); others are analysis-only.",
-    )
-    parser.add_argument(
-        "--promotion-margin",
-        type=float,
-        default=float(benchmark_config.get("promotion_margin", 0.0)),
-        help="Candidates with avg_val > (best baseline - margin) get held-in traces.",
-    )
-    parser.add_argument(
         "--baselines",
         nargs="+",
         default=list(benchmark_config.get("baselines", BASELINES)),
@@ -1119,13 +943,6 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("iterations must be >= 1")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", args.run_name):
         raise SystemExit("run-name may contain only letters, digits, dot, underscore and dash")
-    unknown_selection = sorted(set(args.selection_benchmarks) - set(args.benchmarks))
-    if unknown_selection:
-        raise SystemExit(
-            f"selection-benchmarks must be a subset of benchmarks: {unknown_selection}"
-        )
-    if args.promotion_margin < 0:
-        raise SystemExit("promotion-margin must be >= 0")
     for attribute in ("state_root", "data_dir", "output_dir"):
         path = getattr(args, attribute)
         if not path.is_absolute():

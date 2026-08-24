@@ -215,7 +215,8 @@ def _task_prompt(
         f"Held-out benchmarks (do not inspect during search): "
         f"{', '.join(args.held_out_benchmarks)}.\n"
         f"Candidates are evaluated on validation first. Every candidate that "
-        f"strictly beats the best baseline is then evaluated on held-in to "
+        f"scores above the promotion threshold (best baseline minus margin) "
+        f"is then evaluated on held-in to "
         f"produce training traces.\n"
         f"Validation command template:\n"
         f"`{_render_benchmark_command(args, '<candidate1> <candidate2> <candidate3>', args.selection_benchmarks)}`\n\n"
@@ -506,9 +507,11 @@ def _evaluate(
 def _promoted_candidates(
     results: dict[str, dict[str, Any]],
     baseline_best: float,
+    margin: float = 0.0,
 ) -> list[str]:
-    """所有在 validation 上严格超过最佳 baseline 的候选都可晋级生成 held-in 轨迹。"""
+    """validation 分数超过（最佳 baseline − margin）的候选都可晋级生成 held-in 轨迹。"""
 
+    threshold = baseline_best - margin
     promoted = []
     for name, result in results.items():
         if result.get("benchmark_returncode") != 0:
@@ -517,7 +520,7 @@ def _promoted_candidates(
             Path(path).exists() for path in result.get("summary_paths", {}).values()
         ):
             continue
-        if float(result.get("avg_val", 0.0)) > baseline_best:
+        if float(result.get("avg_val", 0.0)) > threshold:
             promoted.append(name)
     return promoted
 
@@ -801,11 +804,13 @@ def run_evolution(args: argparse.Namespace) -> int:
             validation_tag,
             args.selection_benchmarks,
         )
-        promoted = _promoted_candidates(validation_results, baseline_best)
+        promoted = _promoted_candidates(
+            validation_results, baseline_best, args.promotion_margin
+        )
         held_in_results: dict[str, dict[str, Any]] = {}
         if promoted:
             print(
-                f"  {len(promoted)} candidate(s) beat the baseline best; "
+                f"  {len(promoted)} candidate(s) above the promotion threshold; "
                 "generating held-in traces...",
                 flush=True,
             )
@@ -821,7 +826,7 @@ def run_evolution(args: argparse.Namespace) -> int:
             )
         else:
             print(
-                "  no candidate beat the baseline best; held-in evaluation skipped",
+                "  no candidate above the promotion threshold; held-in evaluation skipped",
                 flush=True,
             )
         results = {}
@@ -945,6 +950,12 @@ def build_parser(
         help="Benchmarks used for frontier selection (avg_val); others are analysis-only.",
     )
     parser.add_argument(
+        "--promotion-margin",
+        type=float,
+        default=float(benchmark_config.get("promotion_margin", 0.0)),
+        help="Candidates with avg_val > (best baseline - margin) get held-in traces.",
+    )
+    parser.add_argument(
         "--baselines",
         nargs="+",
         default=list(benchmark_config.get("baselines", BASELINES)),
@@ -1025,6 +1036,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             f"selection-benchmarks must be a subset of benchmarks: {unknown_selection}"
         )
+    if args.promotion_margin < 0:
+        raise SystemExit("promotion-margin must be >= 0")
     for attribute in ("state_root", "data_dir", "output_dir"):
         path = getattr(args, attribute)
         if not path.is_absolute():

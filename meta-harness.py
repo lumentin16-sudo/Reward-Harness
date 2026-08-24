@@ -205,6 +205,7 @@ def _task_prompt(
         f"Benchmarks: {', '.join(args.benchmarks)}. "
         f"Baselines: {', '.join(BASELINES)}. "
         f"Primary metric: `{args.metric_path}`.\n"
+        f"Frontier selection uses only: {', '.join(args.selection_benchmarks)}.\n"
         f"Held-in training dataset: `{args.held_in_dataset}` "
         f"at `{held_in_directory}`.\n"
         f"Held-out benchmarks (do not inspect during search): "
@@ -232,13 +233,13 @@ def _codex_propose(
     session = paths.codex_sessions / f"iteration_{iteration:03d}"
     session.mkdir(parents=True, exist_ok=True)
     last_message = session / "last_message.md"
+    # codex exec 本身是非交互模式,不会请求审批;部分 CLI 版本的 exec
+    # 子命令不识别 --ask-for-approval,因此不再显式传递。
     command = [
         *shlex.split(args.codex_bin, posix=os.name != "nt"),
         "exec",
         "--sandbox",
         "workspace-write",
-        "--ask-for-approval",
-        "never",
         "--ephemeral",
         "--json",
         "-C",
@@ -470,9 +471,16 @@ def _evaluate(
                 scores[benchmark] = 0.0
             counts = summary.get("counts", {}) if isinstance(summary, dict) else {}
             errors += int(counts.get("errors", 0) or 0) if isinstance(counts, dict) else 0
+        selection = [b for b in args.selection_benchmarks if b in scores]
+        if not selection:
+            selection = list(scores)
         evaluated[agent] = {
             "scores": scores,
-            "avg_val": sum(scores.values()) / len(scores) if scores else 0.0,
+            "avg_val": (
+                sum(scores[b] for b in selection) / len(selection)
+                if selection
+                else 0.0
+            ),
             "num_errors": errors,
             "summary_paths": summaries,
             "run_tag": run_tag,
@@ -777,6 +785,17 @@ def build_parser(
         default=list(benchmark_config.get("benchmarks", ["rewardbench"])),
     )
     parser.add_argument(
+        "--selection-benchmarks",
+        nargs="+",
+        default=list(
+            benchmark_config.get(
+                "selection_benchmarks",
+                benchmark_config.get("benchmarks", ["rewardbench"]),
+            )
+        ),
+        help="Benchmarks used for frontier selection (avg_val); others are analysis-only.",
+    )
+    parser.add_argument(
         "--baselines",
         nargs="+",
         default=list(benchmark_config.get("baselines", BASELINES)),
@@ -852,6 +871,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("iterations must be >= 1")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", args.run_name):
         raise SystemExit("run-name may contain only letters, digits, dot, underscore and dash")
+    unknown_selection = sorted(set(args.selection_benchmarks) - set(args.benchmarks))
+    if unknown_selection:
+        raise SystemExit(
+            f"selection-benchmarks must be a subset of benchmarks: {unknown_selection}"
+        )
     for attribute in ("state_root", "data_dir", "output_dir"):
         path = getattr(args, attribute)
         if not path.is_absolute():

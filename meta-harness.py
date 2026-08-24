@@ -46,6 +46,8 @@ class RunPaths:
     pending: Path
     frontier: Path
     evolution: Path
+    summary: Path
+    artifacts: Path
     reports: Path
     codex_sessions: Path
     benchmark_logs: Path
@@ -58,6 +60,8 @@ class RunPaths:
             pending=root / "pending_eval.json",
             frontier=root / "frontier_val.json",
             evolution=root / "evolution_summary.jsonl",
+            summary=root / "summary.json",
+            artifacts=root / "artifacts.json",
             reports=root / "reports",
             codex_sessions=root / "codex_sessions",
             benchmark_logs=root / "benchmark_logs",
@@ -209,7 +213,9 @@ def _task_prompt(
         f"Validation benchmarks: {', '.join(args.selection_benchmarks)}. "
         f"Baselines: {', '.join(args.baselines)}. "
         f"Primary metric: `{args.metric_path}`.\n"
-        f"Frontier selection uses only: {', '.join(args.selection_benchmarks)}.\n"
+        f"Promotion gate uses only: {', '.join(args.selection_benchmarks)}. "
+        f"Primary optimization target: `_best_held_in` in frontier_val.json "
+        f"(held-in score, 900-case large sample); `_best` (validation) is a noisy guard.\n"
         f"Held-in training dataset: `{args.held_in_dataset}` "
         f"at `{held_in_directory}`.\n"
         f"Held-out benchmarks (do not inspect during search): "
@@ -224,6 +230,8 @@ def _task_prompt(
         f"All optimization state for this run is under `{paths.root}`.\n"
         f"- `{paths.evolution}` — past results\n"
         f"- `{paths.frontier}` — frontier\n"
+        f"- `{paths.summary}` — compact run summary\n"
+        f"- `{paths.artifacts}` — benchmark artifact index\n"
         f"- `{paths.reports}` — post-eval reports\n"
         f"- Held-in training trajectories: "
         f"`results/<run_tag>/{args.held_in_dataset}/<harness>/<model>/`\n"
@@ -573,8 +581,9 @@ def _update_frontier(
     paths: RunPaths,
     results: dict[str, dict[str, Any]],
     metric_path: str,
+    held_in_key: str = "held_in",
 ) -> None:
-    """更新每个 benchmark 的最佳 Harness 和整体最佳 Harness。"""
+    """更新 per-benchmark 最佳、validation 冠军（_best）和 held-in 冠军（_best_held_in）。"""
 
     frontier = _read_json(paths.frontier, {})
     if not isinstance(frontier, dict):
@@ -598,9 +607,89 @@ def _update_frontier(
                 "scores": result["scores"],
                 "run_tag": result["run_tag"],
             }
+        held_in_score = result["scores"].get(held_in_key)
+        if held_in_score is not None:
+            current_held = frontier.get("_best_held_in", {})
+            if not isinstance(current_held, dict) or held_in_score > float(current_held.get("score", -1)):
+                frontier["_best_held_in"] = {
+                    "harness": harness,
+                    "score": held_in_score,
+                    "run_tag": result.get("benchmark_run_tags", {}).get(
+                        held_in_key, result.get("run_tag")
+                    ),
+                }
     frontier["metric_path"] = metric_path
     frontier["updated_at"] = _now()
     _atomic_json(paths.frontier, frontier)
+
+
+def _refresh_run_indexes(paths: RunPaths) -> None:
+    """从现有状态和 benchmark summary 重建面向优化器的两个紧凑索引。"""
+
+    summary_index: dict[str, Any] = {
+        "frontier": _read_json(paths.frontier, {}),
+        "baselines": {},
+        "iterations": {},
+        "updated_at": _now(),
+    }
+    artifact_index: dict[str, Any] = {
+        "baselines": {},
+        "iterations": {},
+        "updated_at": _now(),
+    }
+    for row in _read_jsonl(paths.evolution):
+        system = str(row.get("system", ""))
+        if not system:
+            continue
+        benchmark_details: dict[str, Any] = {}
+        artifact_details: dict[str, Any] = {}
+        for benchmark, raw_path in row.get("summary_paths", {}).items():
+            summary_path = Path(str(raw_path))
+            benchmark_summary = _read_json(summary_path, {})
+            metrics = benchmark_summary.get("metrics", {})
+            benchmark_details[str(benchmark)] = {
+                "score": row.get("scores", {}).get(benchmark),
+                "domain_scores": metrics.get("domain_scores", {}),
+                "counts": benchmark_summary.get("counts", {}),
+                "usage": benchmark_summary.get("usage", {}),
+            }
+            artifact_details[str(benchmark)] = {
+                "run_tag": row.get("benchmark_run_tags", {}).get(
+                    benchmark, row.get("run_tag")
+                ),
+                "summary": str(summary_path),
+                "trajectories": benchmark_summary.get("artifacts", {}).get(
+                    "trajectories"
+                ),
+            }
+
+        compact = {
+            "avg_val": row.get("avg_val", 0.0),
+            "delta": row.get("delta"),
+            "hypothesis": row.get("hypothesis", ""),
+            "base_harness": row.get("base_harness", ""),
+            "benchmarks": benchmark_details,
+            "num_errors": row.get("num_errors", 0),
+            # 兼容已经产生的旧字段；它实际表示是否获准运行 held-in。
+            "selected_for_held_in": bool(
+                row.get(
+                    "selected_for_held_in",
+                    row.get("promoted_to_frontier", False),
+                )
+            ),
+        }
+        if row.get("axis") == "baseline":
+            summary_index["baselines"][system] = compact
+            artifact_index["baselines"][system] = artifact_details
+        else:
+            iteration = str(int(row.get("iteration", 0)))
+            summary_index["iterations"].setdefault(iteration, {})[system] = compact
+            artifact_index["iterations"].setdefault(iteration, {})[
+                system
+            ] = artifact_details
+
+    _atomic_json(paths.summary, summary_index)
+    _atomic_json(paths.artifacts, artifact_index)
 
 
 def _record_results(
@@ -698,6 +787,8 @@ def _initialize_baselines(paths: RunPaths, args: argparse.Namespace) -> None:
         )
         for name, validation_result in validation_results.items()
     }
+    # 合并 held-in 后补登 per-benchmark 榜和 _best_held_in。
+    _update_frontier(paths, results, args.metric_path)
     rows = []
     for name, result in results.items():
         rows.append(
@@ -722,6 +813,7 @@ def _initialize_baselines(paths: RunPaths, args: argparse.Namespace) -> None:
         )
         print(f"  {name}: {result['avg_val']:.2f}%")
     _append_jsonl(paths.evolution, rows)
+    _refresh_run_indexes(paths)
 
 
 def _archive_fresh_run(state_root: Path, run_name: str) -> None:
@@ -760,6 +852,8 @@ def run_evolution(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"missing proposer skill: {SKILL_PATH}")
 
     _initialize_baselines(paths, args)
+    # 旧 run 继续执行时也会自动补齐或重建紧凑索引。
+    _refresh_run_indexes(paths)
     start = _iteration(paths) + 1
     baseline_best = _baseline_best(paths)
     for offset in range(args.iterations):
@@ -850,12 +944,20 @@ def run_evolution(args: argparse.Namespace) -> int:
                 "wall": time.time() - propose_started,
             },
         )
-        # Frontier 只能看到 validation 结果，held-in 指标不参与选择。
-        _update_frontier(paths, validation_results, args.metric_path)
+        # _best 只看 validation(avg_val 语义不变);held-in 分数只进入
+        # per-benchmark 榜和 _best_held_in,不参与 validation 冠军判定。
+        _update_frontier(paths, results, args.metric_path)
+        _refresh_run_indexes(paths)
         for name, evaluation in results.items():
             print(f"  {name}: {evaluation['avg_val']:.2f}%")
         best = _read_json(paths.frontier, {}).get("_best", {})
         print(f"  frontier: {best.get('harness')} @ {float(best.get('avg_val', 0)):.2f}%")
+        best_held = _read_json(paths.frontier, {}).get("_best_held_in", {})
+        if best_held:
+            print(
+                f"  frontier(held_in): {best_held.get('harness')} @ "
+                f"{float(best_held.get('score', 0)):.2f}%"
+            )
 
     return 0
 

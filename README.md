@@ -386,10 +386,14 @@ meta_runs/{run_name}/
 ├── evolution_summary.jsonl
 ├── frontier_val.json
 ├── pending_eval.json
+├── summary.json
+├── artifacts.json
 ├── reports/
 ├── codex_sessions/{iteration}/
 └── benchmark_logs/
 ```
+
+其中 `summary.json` 聚合 baseline、历轮候选、domain 指标、错误和用量；`artifacts.json` 只保存各 benchmark 的 summary 与 trajectories 路径。两者都由现有结果自动重建，不复制原始轨迹，供 Coding Agent 快速定位关键信息。
 
 模型完整轨迹仍保存在原有路径：
 

@@ -16,10 +16,9 @@ benchmark:
   base_url: http://127.0.0.1:8000/v1
   model: Qwen/Qwen3-8B
   benchmarks:
-    - held_in
     - validation
-  # 只有 selection_benchmarks 参与 avg_val 和 frontier 筛选;
-  # held_in 只提供训练轨迹供 Codex 分析学习。
+  # 候选先在 selection_benchmarks 上筛选；只有晋级者再跑 held_in。
+  # 三个 baseline 例外：全部生成 held_in 轨迹，供第一轮 Codex 对比。
   selection_benchmarks:
     - validation
   baselines:

@@ -369,7 +369,15 @@ python meta-harness.py --run-name reward-search --status
 
 搜索阶段固定使用 `trial_num=1`，默认优化 `primary_metrics.beyond_rubric`。Average@N 和 Voting@N 应在选出最终 Harness 后，通过独立的正式 benchmark 命令评测。
 
-Harness Optimization 只使用 `held_in` 做分析/学习，并在 100 条 `validation` 上更新 frontier。RewardBench 和 RM-Bench 作为 held-out 数据，不会在搜索任务提示中提供轨迹。
+Harness Optimization 先在 100 条 `validation` 上评测候选并更新 frontier。三个 baseline 都会额外跑完整 `held_in`，为第一轮优化生成对照轨迹；后续每轮所有在 validation 上严格超过最佳 baseline 的候选都会跑 `held_in`，其轨迹供下一轮 Codex 分析。RewardBench 和 RM-Bench 作为 held-out 数据，不参与搜索阶段。
+
+因此每轮的调用顺序是：
+
+```text
+生成 3 个候选 → 全部跑 validation → 筛出超过最佳 baseline 的候选
+                                  ├─ 有候选过线：全部晋级者跑 held_in
+                                  └─ 无候选过线：跳过 held_in
+```
 
 每个 run 的外循环状态位于：
 

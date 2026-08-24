@@ -180,62 +180,48 @@ def _iteration(paths: RunPaths) -> int:
     )
 
 
-def _render_benchmark_command(
-    args: argparse.Namespace,
-    agents: str,
-    benchmarks: Iterable[str] | None = None,
-) -> str:
-    benchmark_names = " ".join(benchmarks or args.selection_benchmarks)
-    return (
-        "python -m reward_harness.benchmark "
-        f"--benchmarks {benchmark_names} --agents {agents} "
-        f"--base-url {args.base_url} --model {args.model} "
-        f"--temperature {args.temperature} --max-tokens {args.max_tokens} "
-        f"--trial-num 1 --workers {args.workers} "
-        f"--request-workers {args.request_workers} "
-        f"--smoke-per-group {args.smoke_per_group} "
-        f"--sample-size {args.sample_size} --seed {args.seed}"
-    )
-
-
 def _task_prompt(
     paths: RunPaths,
     args: argparse.Namespace,
     iteration: int,
 ) -> str:
-    """参考原 Meta-Harness，只向 Codex 提供本轮环境与状态路径。"""
+    """Build a minimal runtime prompt for one evolution iteration.
+
+    Optimization policy lives in SKILL.md.
+    Experiment configuration lives in config/state files.
+    This prompt only exposes the current run context and artifact locations.
+    """
 
     held_in_directory = args.data_dir / args.held_in_dataset
     return (
-        f"Run iteration {iteration} of the Reward-Harness evolution loop. "
-        f"First read and follow `{SKILL_PATH.relative_to(ROOT)}` completely.\n\n"
-        f"## Eval configuration\n"
-        f"Validation benchmarks: {', '.join(args.selection_benchmarks)}. "
-        f"Baselines: {', '.join(args.baselines)}. "
-        f"Primary metric: `{args.metric_path}`.\n"
-        f"Promotion gate uses only: {', '.join(args.selection_benchmarks)}. "
-        f"Primary optimization target: `_best_held_in` in frontier_val.json "
-        f"(held-in score, 900-case large sample); `_best` (validation) is a noisy guard.\n"
-        f"Held-in training dataset: `{args.held_in_dataset}` "
-        f"at `{held_in_directory}`.\n"
-        f"Held-out benchmarks (do not inspect during search): "
-        f"{', '.join(args.held_out_benchmarks)}.\n"
-        f"Candidates are evaluated on validation first. Every candidate that "
-        f"scores above the promotion threshold (best baseline minus margin) "
-        f"is then evaluated on held-in to "
-        f"produce training traces.\n"
-        f"Validation command template:\n"
-        f"`{_render_benchmark_command(args, '<candidate1> <candidate2> <candidate3>', args.selection_benchmarks)}`\n\n"
-        f"## Run directories\n"
-        f"All optimization state for this run is under `{paths.root}`.\n"
-        f"- `{paths.evolution}` — past results\n"
-        f"- `{paths.frontier}` — frontier\n"
-        f"- `{paths.summary}` — compact run summary\n"
-        f"- `{paths.artifacts}` — benchmark artifact index\n"
-        f"- `{paths.reports}` — post-eval reports\n"
-        f"- Held-in training trajectories: "
-        f"`results/<run_tag>/{args.held_in_dataset}/<harness>/<model>/`\n"
-        f"- Write pending_eval.json to: `{paths.pending}`"
+        f"Run iteration {iteration} of the Reward-Harness evolution loop.\n\n"
+
+        f"First read and follow "
+        f"`{SKILL_PATH.relative_to(ROOT)}` completely. "
+        f"Treat the run state and configuration files below as the source of truth "
+        f"for this iteration.\n\n"
+
+        f"## Run context\n"
+        f"- Run root: `{paths.root}`\n"
+        f"- Configuration: `{args.config}`\n"
+        f"- Held-in training dataset: `{args.held_in_dataset}` "
+        f"at `{held_in_directory}`\n"
+        f"- Held-out benchmarks (do NOT inspect their data or traces during "
+        f"search): {', '.join(args.held_out_benchmarks)}.\n\n"
+
+        f"## Optimization state\n"
+        f"- Evolution history: `{paths.evolution}`\n"
+        f"- Current frontier: `{paths.frontier}`\n"
+        f"- Run summary: `{paths.summary}`\n"
+        f"- Evaluation artifact index: `{paths.artifacts}`\n"
+        f"- Post-evaluation reports: `{paths.reports}`\n\n"
+
+        f"Use the artifact index to locate any evaluation traces or summaries "
+        f"needed for analysis. Respect all data-access and optimization constraints "
+        f"defined in the skill and configuration.\n\n"
+
+        f"## Output\n"
+        f"Write the candidate proposal manifest to: `{paths.pending}`\n"
     )
 
 

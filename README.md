@@ -1,19 +1,19 @@
 # Reward-Harness
 
-Reward-Harness 是一个面向生成式 Reward Model / LLM-as-a-Judge 的评测框架。它使用统一的 `RewardSystem` 接口组织任务、Rubric 生成、候选回答评分和结果聚合，并提供 RewardBench、RewardBench 2、RM-Bench 的本地 vLLM 评测流程。
+Reward-Harness 是一个面向生成式 Reward Model / LLM-as-a-Judge 的评测框架。它使用统一的 `RewardSystem` 接口组织任务、Rubric 生成、pairwise 判断和 winner 输出，并提供 RewardBench、RewardBench 2、RM-Bench 的本地 vLLM 评测流程。
 
 当前默认模型为 `Qwen/Qwen3-8B`。正式评测只连接本地或自建的 OpenAI-compatible vLLM 服务，不包含 SiliconFlow 等云 API 调用逻辑。
 
 ## 主要功能
 
 - 统一的 Reward System 数据结构和调用接口。
-- 每道题只生成一次共享 `RubricSet`，随后分别评价该题的所有候选回答。
+- 每道题只生成一次共享 `RubricSet`，随后比较完整候选回答并输出唯一 winner。
 - 自动发现 `reward_harness/agents/` 中的 Reward Harness，无需修改 runner。
-- 支持有 Rubric、动态 Skill 和无 Rubric 直接评分三种 baseline。
+- 支持有 Rubric、动态 Skill 和无 Rubric 直接判断等 baseline。
 - 支持 RewardBench、RewardBench 2 和 RM-Bench 官方风格指标。
 - 数据准备与模型评测解耦；评测阶段不会隐式下载数据。
 - 双层并发、请求限流、LLM 响应缓存、错误重试和中断续跑。
-- 保存逐题轨迹、原始模型响应、Rubric、Judgment、token、延迟和汇总指标。
+- 保存逐题轨迹、原始模型响应、Rubric、WinnerResult、token、延迟和汇总指标。
 - 使用顶层时间 tag 隔离每次实验；复用同一 tag 可以断点续跑。
 
 ## 目录结构
@@ -344,7 +344,7 @@ python -m reward_harness.prepare_data --help
 
 ## Harness Optimization（Codex CLI）
 
-`meta-harness.py` 实现 propose → validate → benchmark → frontier update 外循环。Codex CLI 只负责读取历史轨迹、原型机制并新增 3 个候选 Harness；可信 benchmark 始终由外循环单独执行。
+`meta-harness.py` 实现 propose → candidate check → benchmark → frontier update 外循环。Codex CLI 只负责读取历史轨迹、原型机制并新增 3 个候选 Harness；可信 benchmark 始终由外循环单独执行。
 
 默认配置位于根目录 `config.yaml`，包含 run、Codex、benchmark 和路径设置。搜索阶段的 `trial_num` 不在 YAML 中配置，始终固定为 1。优先级为：
 
@@ -375,10 +375,57 @@ python meta-harness.py --run-name reward-search --status
 
 Harness Optimization 使用单一的 500 条 `held_in` 搜索集。四个 baseline 和每轮所有候选都在同一集合上运行；该集合的指标用于更新 frontier，完整轨迹同时供下一轮 Codex 分析。RewardBench 和 RM-Bench 作为 held-out 数据，不参与搜索阶段。
 
-因此每轮的调用顺序是：
+因此 outer-loop 的调用顺序是：
 
 ```text
-生成 3 个候选 → 全部跑 held_in → 计算搜索分数与完整轨迹 → 更新 frontier
+第 0 步：初始化 baseline
+如果当前 run 还没有 frontier_val.json：
+  meta-harness.py 调 benchmark.py
+  在 held-in/search benchmarks 上评测 baseline harnesses，比如 no_rubric / no_skill / init_skill_no_rubric / init_skill
+  然后把当前最高 avg_val 的 harness 写进 frontier_val.json
+  同时把 baseline 结果写进 evolution_summary.jsonl
+
+第 1 步：coding agent propose
+每一轮 iteration：
+  meta-harness.py 调 Codex CLI
+  Codex CLI 加载 .claude/skills/meta-harness-reward-skill/SKILL.md
+  coding agent 读取 evolution_summary.jsonl、frontier_val.json、recent trajectories、当前 benchmark/config/base harness
+  它可以看全部 recent trajectories，不限于 frontier harness
+  但 frontier_val.json 告诉它当前最优 harness 是谁
+
+第 2 步：coding agent 写 candidates
+coding agent 基于当前 top-performing/base harness 做修改
+生成 3 个新的 reward skill harness 文件：reward_harness/agents/<candidate>.py
+然后写 pending_eval.json，包含 name、file、hypothesis、axis、base_harness、components
+
+第 3 步：candidate check
+meta-harness.py 读取 pending_eval.json
+对每个 candidate 做轻量检查：
+  名字是否合法
+  file 路径是否匹配
+  文件是否存在
+  Python 文件能不能 import
+  是否正好定义一个 RewardSystem subclass / HARNESS_CLASS
+  是否实现 get_skill_registry / build_rubrics / judge
+这一步不是 benchmark，不是 held-out，不是验证集评测，只是 candidate check / import check / interface check
+
+第 4 步：评测 candidates
+通过 candidate check 的 candidates 会被传给 benchmark.py
+benchmark.py 在 held-in/search benchmarks 上跑这些 candidates
+生成 summary.json 和 trajectories.jsonl
+meta-harness.py 从 summary.json 里读 metric，算 avg_val
+
+第 5 步：记录和更新 frontier
+meta-harness.py 把所有 evaluated candidates 的结果追加到 evolution_summary.jsonl
+然后和当前 frontier 比较：
+  如果 candidate avg_val > 当前 frontier avg_val：
+    更新 frontier_val.json
+  否则：
+    结果保留在 evolution_summary.jsonl
+    但不会成为 frontier
+
+第 6 步：下一轮
+下一轮 coding agent 再读取新的 evolution_summary.jsonl、frontier_val.json、recent trajectories，继续 propose 新 candidates
 ```
 
 每个 run 的外循环状态位于：

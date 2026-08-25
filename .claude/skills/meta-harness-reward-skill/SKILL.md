@@ -16,7 +16,7 @@ Run ONE iteration of reward skill harness evolution. Do all work in the main ses
 - ALWAYS complete all steps including prototyping.
 - Design exactly 3 candidates per iteration: at least 1 exploitation of current frontier, at least 1 exploration.
 - Do NOT modify benchmark code, data files, model clients, evaluator logic, or `reward_system.py`.
-- Do NOT modify existing baseline harnesses such as `no_skill.py`, `init_skill.py`, or `no_rubric.py`.
+- Do NOT modify existing baseline harnesses such as `no_rubric.py`, `no_skill.py`, `init_skill_no_rubric.py`, or `init_skill.py`.
 - Each candidate MUST be a new Python file under `reward_harness/agents/`.
 
 ## Anti-Parameter-Tuning Rules
@@ -98,7 +98,7 @@ class RewardSystem(ABC):
 ```
 
 Extend `RewardSystem` from `..reward_system`
-Import `LLMCallable`, `Query`, `Response`, `Rubric`, `RubricSet`, `Skill`, `SkillStage`, `SkillRegistry`, and `WinnerResult` from `..reward_system`
+Import `LLMCallable`, `Query`, `Response`, `Rubric`, `RubricJudgment`, `RubricSet`, `Skill`, `SkillStage`, `SkillRegistry`, and `WinnerResult` from `..reward_system`
 `Skill` requires `name`, `stage`, `description`, and `content`; stage must be `"G"` or `"J"`
 Use `registry.for_stage("G")` or `registry.for_stage("J")` before skill selection when a stage-specific skill pool is needed
 Use `self._task_payload(task)` for public task payloads
@@ -122,7 +122,7 @@ Use `self.judge_llm(prompt)` for comparative judging calls (NOT `self._judge_llm
 
 ### Step 0: Post-eval reports (write if missing)
 
-Check the reports directory (path in the task prompt's "Run directories" section). For each past iteration that has results in `evolution_summary.jsonl` but NO report, write one. Each report should be <=30 lines covering: what changed, which benchmarks improved/regressed and why, and a takeaway for future iterations.
+Check the reports directory (path in the task prompt's "Optimization state" section). For each past iteration that has results in `evolution_summary.jsonl` but NO report, write one. Each report should be <=30 lines covering: what changed, which benchmarks improved/regressed and why, and a takeaway for future iterations.
 
 ### Step 1: Analyze
 
@@ -152,7 +152,7 @@ For each of the 3 candidates:
 1. Copy a top-performing base harness to `reward_harness/agents/<name>.py`, then make targeted modifications. This copy-then-edit approach ensures correct imports and proven patterns.
 2. Implement the new mechanism according to your hypothesis.
 3. Self-critique (mandatory): After implementing, re-read the file and check: does this harness introduce a genuinely NEW mechanism, or is it just a parameter variant? If the logic in `get_skill_registry()`, `build_rubrics()`, and `judge()` is identical to the base except for constants, REWRITE with a truly novel mechanism.
-4. Validate:
+4. Import/interface check:
 
 ```bash
 python3 -c "from reward_harness.agents.<name> import *; print('OK')"
@@ -190,9 +190,10 @@ CANDIDATES: <name1>, <name2>, <name3>
 
 - `no_rubric.py`: no rubric generation; vanilla pairwise forced-choice Judge.
 - `no_skill.py`: generates a query-specific rubric, then performs rubric-guided pairwise forced-choice without a Skill.
-- `init_skill.py`: injects an editable J-stage evaluation Skill into pairwise forced-choice judging.
+- `init_skill_no_rubric.py`: injects an editable J-stage evaluation Skill into pairwise forced-choice judging without rubric generation.
+- `init_skill.py`: injects an editable G-stage Rubric Skill into rubric generation, then performs rubric-guided pairwise forced-choice judging.
 
-Usually build candidates from `init_skill.py` unless the task prompt gives a different base.
+Usually build candidates from the current frontier or another top-performing base harness unless the task prompt gives a different base.
 
 ## Result Files
 

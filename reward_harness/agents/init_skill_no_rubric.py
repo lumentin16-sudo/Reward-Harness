@@ -18,7 +18,7 @@ SKILL_PAIRWISE_JUDGE_PROMPT = """
 You are a fair and impartial judge. Your task is to evaluate 'Response A' and 'Response B' based on a given instruction to select the single best response.
 **NOTE**: You must select a winner. Never respond with "None" or "Neither" as the winner.
 
-You may use the Skill derived from other validated examples, as references if helpful.
+You may use the Skill derived from other successful examples, as references if helpful.
 
 **Skill:**
 {skill}

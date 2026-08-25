@@ -30,7 +30,6 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parent
-AGENTS_DIR = ROOT / "reward_harness" / "agents"
 SKILL_PATH = ROOT / ".claude" / "skills" / "meta-harness-reward-skill" / "SKILL.md"
 DEFAULT_STATE_ROOT = ROOT / "meta_runs"
 BASELINES = ("no_rubric", "no_skill", "init_skill_no_rubric", "init_skill")
@@ -420,17 +419,6 @@ def _summary_path(
     return candidates[0] if len(candidates) == 1 else expected
 
 
-def _metric(summary: dict[str, Any], metric_path: str) -> float:
-    value: Any = summary
-    for part in metric_path.split("."):
-        if not isinstance(value, dict) or part not in value:
-            raise KeyError(metric_path)
-        value = value[part]
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"metric {metric_path} is not numeric")
-    return float(value) * 100.0
-
-
 def _evaluate(
     paths: RunPaths,
     args: argparse.Namespace,
@@ -460,24 +448,30 @@ def _evaluate(
 
     evaluated: dict[str, dict[str, Any]] = {}
     for agent in agents:
-        scores: dict[str, float] = {}
+        domain_scores: dict[str, float] = {}
         summaries: dict[str, str] = {}
         errors = 0
         for benchmark in benchmark_names:
             path = _summary_path(args, run_tag, benchmark, agent)
             summary = _read_json(path, {})
             summaries[benchmark] = str(path)
-            try:
-                scores[benchmark] = _metric(summary, args.metric_path)
-            except (KeyError, TypeError):
-                scores[benchmark] = 0.0
+            raw_domains = summary.get("metrics", {}).get("domain_scores", {})
+            if isinstance(raw_domains, dict):
+                domain_scores.update(
+                    {
+                        str(domain): float(score) * 100.0
+                        for domain, score in raw_domains.items()
+                        if isinstance(score, (int, float))
+                        and not isinstance(score, bool)
+                    }
+                )
             counts = summary.get("counts", {}) if isinstance(summary, dict) else {}
             errors += int(counts.get("errors", 0) or 0) if isinstance(counts, dict) else 0
         evaluated[agent] = {
-            "scores": scores,
+            "scores": domain_scores,
             "avg_val": (
-                sum(scores.values()) / len(scores)
-                if scores
+                sum(domain_scores.values()) / len(domain_scores)
+                if domain_scores
                 else 0.0
             ),
             "num_errors": errors,
@@ -501,20 +495,23 @@ def _update_frontier(
     results: dict[str, dict[str, Any]],
     metric_path: str,
 ) -> None:
-    """根据单一搜索集分数更新 per-benchmark 和全局最佳 Harness。"""
+    """更新四个领域各自的最优 Harness 和领域宏平均最高的全局 Harness。"""
 
     frontier = _read_json(paths.frontier, {})
     if not isinstance(frontier, dict):
         frontier = {}
-    benchmark_frontier = frontier.setdefault("benchmarks", {})
+    frontier.pop("benchmarks", None)
+    frontier.pop("_best_held_in", None)
+    domain_frontier = frontier.setdefault("domains", {})
     for harness, result in results.items():
-        for benchmark, score in result["scores"].items():
-            current = benchmark_frontier.get(benchmark, {})
+        summary_path = next(iter(result["summary_paths"].values()), None)
+        for domain, score in result["scores"].items():
+            current = domain_frontier.get(domain, {})
             if not isinstance(current, dict) or score > float(current.get("score", -1)):
-                benchmark_frontier[benchmark] = {
+                domain_frontier[domain] = {
                     "harness": harness,
                     "score": score,
-                    "summary_path": result["summary_paths"][benchmark],
+                    "summary_path": summary_path,
                     "run_tag": result["run_tag"],
                 }
         current_best = frontier.get("_best", {})
@@ -522,7 +519,7 @@ def _update_frontier(
             frontier["_best"] = {
                 "harness": harness,
                 "avg_val": result["avg_val"],
-                "scores": result["scores"],
+                "domain_scores": result["scores"],
                 "run_tag": result["run_tag"],
             }
     frontier["metric_path"] = metric_path
@@ -793,7 +790,7 @@ def build_parser(
     parser.add_argument(
         "--benchmarks",
         nargs="+",
-        default=list(benchmark_config.get("benchmarks", ["rewardbench"])),
+        default=list(benchmark_config.get("benchmarks", ["held_in"])),
     )
     parser.add_argument(
         "--baselines",
@@ -803,7 +800,7 @@ def build_parser(
     parser.add_argument(
         "--metric-path",
         default=benchmark_config.get(
-            "metric_path", "primary_metrics.beyond_rubric"
+            "metric_path", "metrics.domain_scores"
         ),
     )
     parser.add_argument("--temperature", type=float, default=benchmark_config.get("temperature", 0.7))

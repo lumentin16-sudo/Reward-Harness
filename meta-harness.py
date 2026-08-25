@@ -46,8 +46,6 @@ class RunPaths:
     pending: Path
     frontier: Path
     evolution: Path
-    summary: Path
-    artifacts: Path
     reports: Path
     codex_sessions: Path
     benchmark_logs: Path
@@ -60,8 +58,6 @@ class RunPaths:
             pending=root / "pending_eval.json",
             frontier=root / "frontier_val.json",
             evolution=root / "evolution_summary.jsonl",
-            summary=root / "summary.json",
-            artifacts=root / "artifacts.json",
             reports=root / "reports",
             codex_sessions=root / "codex_sessions",
             benchmark_logs=root / "benchmark_logs",
@@ -212,13 +208,11 @@ def _task_prompt(
         f"## Optimization state\n"
         f"- Evolution history: `{paths.evolution}`\n"
         f"- Current frontier: `{paths.frontier}`\n"
-        f"- Run summary: `{paths.summary}`\n"
-        f"- Evaluation artifact index: `{paths.artifacts}`\n"
         f"- Post-evaluation reports: `{paths.reports}`\n\n"
 
-        f"Use the artifact index to locate any evaluation traces or summaries "
-        f"needed for analysis. Respect all data-access and optimization constraints "
-        f"defined in the skill and configuration.\n\n"
+        f"Use the evolution history to locate evaluation traces or summaries. "
+        f"Respect all data-access and optimization constraints defined in the "
+        f"skill and configuration.\n\n"
 
         f"## Output\n"
         f"Write the candidate proposal manifest to: `{paths.pending}`\n"
@@ -536,68 +530,6 @@ def _update_frontier(
     _atomic_json(paths.frontier, frontier)
 
 
-def _refresh_run_indexes(paths: RunPaths) -> None:
-    """从现有状态和 benchmark summary 重建面向优化器的两个紧凑索引。"""
-
-    summary_index: dict[str, Any] = {
-        "frontier": _read_json(paths.frontier, {}),
-        "baselines": {},
-        "iterations": {},
-        "updated_at": _now(),
-    }
-    artifact_index: dict[str, Any] = {
-        "baselines": {},
-        "iterations": {},
-        "updated_at": _now(),
-    }
-    for row in _read_jsonl(paths.evolution):
-        system = str(row.get("system", ""))
-        if not system:
-            continue
-        benchmark_details: dict[str, Any] = {}
-        artifact_details: dict[str, Any] = {}
-        for benchmark, raw_path in row.get("summary_paths", {}).items():
-            summary_path = Path(str(raw_path))
-            benchmark_summary = _read_json(summary_path, {})
-            metrics = benchmark_summary.get("metrics", {})
-            benchmark_details[str(benchmark)] = {
-                "score": row.get("scores", {}).get(benchmark),
-                "domain_scores": metrics.get("domain_scores", {}),
-                "counts": benchmark_summary.get("counts", {}),
-                "usage": benchmark_summary.get("usage", {}),
-            }
-            artifact_details[str(benchmark)] = {
-                "run_tag": row.get("benchmark_run_tags", {}).get(
-                    benchmark, row.get("run_tag")
-                ),
-                "summary": str(summary_path),
-                "trajectories": benchmark_summary.get("artifacts", {}).get(
-                    "trajectories"
-                ),
-            }
-
-        compact = {
-            "avg_val": row.get("avg_val", 0.0),
-            "delta": row.get("delta"),
-            "hypothesis": row.get("hypothesis", ""),
-            "base_harness": row.get("base_harness", ""),
-            "benchmarks": benchmark_details,
-            "num_errors": row.get("num_errors", 0),
-        }
-        if row.get("axis") == "baseline":
-            summary_index["baselines"][system] = compact
-            artifact_index["baselines"][system] = artifact_details
-        else:
-            iteration = str(int(row.get("iteration", 0)))
-            summary_index["iterations"].setdefault(iteration, {})[system] = compact
-            artifact_index["iterations"].setdefault(iteration, {})[
-                system
-            ] = artifact_details
-
-    _atomic_json(paths.summary, summary_index)
-    _atomic_json(paths.artifacts, artifact_index)
-
-
 def _record_results(
     paths: RunPaths,
     iteration: int,
@@ -682,7 +614,6 @@ def _initialize_baselines(paths: RunPaths, args: argparse.Namespace) -> None:
         )
         print(f"  {name}: {result['avg_val']:.2f}%")
     _append_jsonl(paths.evolution, rows)
-    _refresh_run_indexes(paths)
 
 
 def _archive_fresh_run(state_root: Path, run_name: str) -> None:
@@ -721,8 +652,6 @@ def run_evolution(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"missing proposer skill: {SKILL_PATH}")
 
     _initialize_baselines(paths, args)
-    # 旧 run 继续执行时也会自动补齐或重建紧凑索引。
-    _refresh_run_indexes(paths)
     start = _iteration(paths) + 1
     for offset in range(args.iterations):
         if _interrupted:
@@ -780,7 +709,6 @@ def run_evolution(args: argparse.Namespace) -> int:
             },
         )
         _update_frontier(paths, results, args.metric_path)
-        _refresh_run_indexes(paths)
         for name, evaluation in results.items():
             print(f"  {name}: {evaluation['avg_val']:.2f}%")
         best = _read_json(paths.frontier, {}).get("_best", {})

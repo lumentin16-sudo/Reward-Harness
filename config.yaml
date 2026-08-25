@@ -22,8 +22,6 @@ benchmark:
     - no_skill
     - init_skill_no_rubric
     - init_skill
-  metric_path: metrics.domain_scores
-
   # Harness Optimization 搜索阶段固定 trial_num=1。
   temperature: 0.7
   max_tokens: 10000

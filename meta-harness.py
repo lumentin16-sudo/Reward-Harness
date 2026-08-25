@@ -493,7 +493,6 @@ def _frontier_best(frontier: dict[str, Any]) -> float:
 def _update_frontier(
     paths: RunPaths,
     results: dict[str, dict[str, Any]],
-    metric_path: str,
 ) -> None:
     """更新四个领域各自的最优 Harness 和领域宏平均最高的全局 Harness。"""
 
@@ -522,7 +521,6 @@ def _update_frontier(
                 "domain_scores": result["scores"],
                 "run_tag": result["run_tag"],
             }
-    frontier["metric_path"] = metric_path
     frontier["updated_at"] = _now()
     _atomic_json(paths.frontier, frontier)
 
@@ -590,7 +588,7 @@ def _initialize_baselines(paths: RunPaths, args: argparse.Namespace) -> None:
         raise RuntimeError(
             f"baseline benchmark failed for {failed}; see {paths.benchmark_logs}"
         )
-    _update_frontier(paths, results, args.metric_path)
+    _update_frontier(paths, results)
     rows = []
     for name, result in results.items():
         rows.append(
@@ -705,7 +703,7 @@ def run_evolution(args: argparse.Namespace) -> int:
                 "wall": time.time() - propose_started,
             },
         )
-        _update_frontier(paths, results, args.metric_path)
+        _update_frontier(paths, results)
         for name, evaluation in results.items():
             print(f"  {name}: {evaluation['avg_val']:.2f}%")
         best = _read_json(paths.frontier, {}).get("_best", {})
@@ -796,12 +794,6 @@ def build_parser(
         "--baselines",
         nargs="+",
         default=list(benchmark_config.get("baselines", BASELINES)),
-    )
-    parser.add_argument(
-        "--metric-path",
-        default=benchmark_config.get(
-            "metric_path", "metrics.domain_scores"
-        ),
     )
     parser.add_argument("--temperature", type=float, default=benchmark_config.get("temperature", 0.7))
     parser.add_argument("--max-tokens", type=int, default=benchmark_config.get("max_tokens", 10000))

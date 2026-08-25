@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """使用 Codex CLI 驱动 Reward-Harness 优化外循环。
 
-每轮由 Codex 按 Skill 生成三个新 Harness；本脚本负责校验候选、调用可信
-benchmark，并更新追加式演化历史和验证集前沿。
+每轮由 Codex 按 Skill 生成三个新 Harness；本脚本负责检查候选、调用可信
+benchmark，并更新追加式演化历史和 held-in 搜索集前沿。
 
 使用示例：
     python meta-harness.py --iterations 1 --run-name reward-search
@@ -284,7 +284,7 @@ def _load_pending(paths: RunPaths) -> list[dict[str, Any]]:
     return candidates
 
 
-def _validate_one_candidate(candidate: dict[str, Any]) -> str | None:
+def _check_one_candidate(candidate: dict[str, Any]) -> str | None:
     """检查候选路径、命名、冷启动导入和 RewardSystem 抽象接口。"""
 
     name = candidate.get("name")
@@ -297,12 +297,12 @@ def _validate_one_candidate(candidate: dict[str, Any]) -> str | None:
     if not path.is_file():
         return "candidate file is missing"
 
-    validation_code = f"""
+    import_check_code = f"""
 import importlib.util, inspect, sys
 from pathlib import Path
 from reward_harness.reward_system import RewardSystem
 path = Path({str(path)!r})
-module_name = 'reward_harness.agents._meta_validate_{name}'
+module_name = 'reward_harness.agents._meta_import_check_{name}'
 spec = importlib.util.spec_from_file_location(module_name, path)
 module = importlib.util.module_from_spec(spec)
 sys.modules[module_name] = module
@@ -317,14 +317,14 @@ assert len(classes) == 1
 assert not inspect.isabstract(classes[0])
 print('OK')
 """
-    result = _run([sys.executable, "-c", validation_code], timeout=60)
+    result = _run([sys.executable, "-c", import_check_code], timeout=60)
     if result.returncode != 0 or "OK" not in result.stdout:
         detail = (result.stderr or result.stdout).strip().replace("\n", " ")
-        return f"import validation failed: {detail[:300]}"
+        return f"import check failed: {detail[:300]}"
     return None
 
 
-def _validate_candidates(
+def _check_candidates(
     candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     valid = []
@@ -334,7 +334,7 @@ def _validate_candidates(
         if not isinstance(candidate, dict):
             print("  INVALID candidate entry is not an object")
             continue
-        error = "duplicate candidate name" if name in names else _validate_one_candidate(candidate)
+        error = "duplicate candidate name" if name in names else _check_one_candidate(candidate)
         if isinstance(name, str):
             names.add(name)
         if error:
@@ -678,7 +678,7 @@ def run_evolution(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"Invalid pending_eval.json: {exc}")
             continue
-        valid = _validate_candidates(candidates)
+        valid = _check_candidates(candidates)
         if not valid:
             print("No valid candidates; iteration not benchmarked.")
             continue

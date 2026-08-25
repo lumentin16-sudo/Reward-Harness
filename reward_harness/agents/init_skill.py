@@ -1,6 +1,8 @@
-"""Eval-Skill 官方 skill pairwise judging Prompt 的初始 Harness。"""
+"""使用 G-stage Rubric Skill 生成判别性标准的初始 Harness。"""
 
 from __future__ import annotations
+
+import json
 
 from ..reward_system import (
     Query,
@@ -11,41 +13,102 @@ from ..reward_system import (
     SkillRegistry,
     WinnerResult,
 )
+
+
 HARNESS_NAME = "init_skill"
 
 
-SKILL_PAIRWISE_JUDGE_PROMPT = """
-You are a fair and impartial judge. Your task is to evaluate 'Response A' and 'Response B' based on a given instruction to select the single best response.
-**NOTE**: You must select a winner. Never respond with "None" or "Neither" as the winner.
+RUBRIC_GENERATION_SKILL = Skill(
+    name="response_aware_rubric_workflow",
+    stage="G",
+    description=(
+        "Generate task-specific, response-aware criteria that expose the decisive "
+        "quality differences between candidate responses."
+    ),
+    content="""## Workflow
+1. Reconstruct the user's core intent, explicit constraints, and implicit quality
+   requirements from the Query.
+2. Inspect all Responses to identify the concrete differences that could change
+   which response better satisfies the Query.
+3. Convert those differences into atomic, observable criteria. Each criterion
+   must be usable to assess any response independently, even though the response
+   set was used to discover it.
+4. Prioritize correctness, instruction following, completeness, safety, and
+   reasoning only when they are relevant to this Query. Separate hard failures
+   from softer quality distinctions.
+5. Remove redundant, stylistic, position-dependent, or winner-encoding criteria.
 
-You may use the Skill derived from other validated examples, as references if helpful.
+## Output Principles
+- Do not mention Response A/B, response order, candidate IDs, or a presumed winner.
+- Do not reward verbosity, formatting, or confident tone unless requested.
+- Use specific decision-relevant wording rather than generic criteria.
+""",
+)
 
-**Skill:**
+
+RUBRIC_SKILL_PROMPT = """
+You are generating a shared evaluation rubric for a comparative reward model.
+Follow the supplied Rubric Skill exactly.
+
+Rubric Skill:
 {skill}
 -----------------END OF THE SKILL------------------
 
-### REQUIRED OUTPUT FORMAT
-You must follow this exact output format below. Conduct your detailed analysis in the `Analysis` section, following the exact structure, workflow, and instructions defined in the **Skill**, and finally give your decision in the `Final Judgment` section.
+Public Query:
+{query}
+
+Anonymous Responses:
+{responses}
+
+Return one JSON object only:
+{{
+  "rubrics": [
+    {{
+      "rubric_id": "r1",
+      "criterion": "A single atomic and observable requirement"
+    }}
+  ]
+}}
+
+The rubric may use the complete response set to discover discriminative criteria,
+but every criterion must remain position-independent and must not reveal or encode
+which response should win.
+""".strip()
+
+
+RUBRIC_JUDGE_PROMPT = """
+You are a fair and impartial judge. Compare Response A and Response B under the
+shared response-aware rubric and select the single response that best satisfies
+the user's instruction. You must select exactly one winner.
+
+Evaluate decisive hard failures before softer quality differences. Do not let a
+minor criterion override the user's core intent. Cite concrete evidence from both
+responses and do not reward verbosity.
 
 --- Analysis ---
-<Conduct your detailed analysis following the exact workflow and instructions defined in the Skill>
+<Compare both responses against the relevant rubric criteria>
 
 --- Final Judgment ---
-Aggregation Summary: <1-3 sentences explaining why the winning response was chosen over the other>
-Justification: <...>
+Aggregation Summary: <the decisive differences>
+Justification: <why those differences determine the result>
 Winner: <Response A / Response B>
 
 Task to Evaluate:
 Instruction:
 {instruction}
 
+Rubric:
+{rubric}
+
 {response_block}
 """.strip()
 
 
 def _response_block(responses: tuple[Response, ...]) -> str:
+    """把双回答渲染成稳定的 A/B 比较格式。"""
+
     if len(responses) != 2:
-        raise ValueError("Eval-Skill pairwise judging requires exactly 2 responses")
+        raise ValueError("init_skill pairwise judging requires exactly 2 responses")
     return "".join(
         f"--- Response {label} ---\n"
         f"{response.content.strip()}\n"
@@ -59,6 +122,8 @@ def _winner_result(
     responses: tuple[Response, ...],
     evaluation: str,
 ) -> WinnerResult:
+    """从固定 Final Judgment 区域提取 A/B winner。"""
+
     prediction = (
         evaluation.rsplit("Final Decision", 1)[-1]
         .rsplit("Final Judgment", 1)[-1]
@@ -75,7 +140,7 @@ def _winner_result(
     )
     label = prediction[0].upper() if prediction else ""
     if label not in {"A", "B"}:
-        raise ValueError("Eval-Skill judge must declare Winner: Response A/B")
+        raise ValueError("init_skill judge must declare Winner: Response A/B")
     return WinnerResult(
         query_id=query.query_id,
         winner_response_id=responses[ord(label) - ord("A")].response_id,
@@ -83,49 +148,42 @@ def _winner_result(
             "winner_label": label,
             "comparison": "pairwise_forced_choice",
             "method": "init_skill",
+            "rubric_skill": RUBRIC_GENERATION_SKILL.name,
         },
     )
 
 
-EVAL_SKILL = Skill(
-    name="pairwise_evaluation_workflow",
-    stage="J",
-    description="Compare two responses using an evidence-first evaluation workflow.",
-    content="""## Analysis
-1. Reconstruct the user's core intent and binding explicit constraints.
-2. Evaluate Response A and Response B independently for correctness,
-   instruction following, relevance, completeness, safety, and clarity, applying
-   only dimensions that matter to the task.
-3. Cite concrete evidence and classify defects by consequence. A fatal or major
-   answer-changing error outweighs multiple stylistic strengths.
-4. Compare the responses directly. Do not reward verbosity, confidence,
-   familiar phrasing, or formatting that the user did not request.
-
-## Final Judgment
-Aggregate the decisive differences, explain why they matter to task success,
-and select exactly one winner. Never output None, Neither, or a tie.
-""",
-)
-
-
 class InitSkillHarness(RewardSystem):
-    """把可由 Harness Optimization 编辑的离线 Skill 注入官方 Judge Prompt。"""
+    """用固定 G-stage Skill 生成 Rubrics，再执行 rubric-guided Judge。"""
 
-    judge_prompt_template = SKILL_PAIRWISE_JUDGE_PROMPT
+    rubric_prompt_template = RUBRIC_SKILL_PROMPT
+    judge_prompt_template = RUBRIC_JUDGE_PROMPT
 
     def get_skill_registry(self, task: Query) -> SkillRegistry:
-        return SkillRegistry((EVAL_SKILL,))
+        return SkillRegistry((RUBRIC_GENERATION_SKILL,))
 
     def build_rubrics(
-        self, task: Query, responses: tuple[Response, ...]
+        self,
+        task: Query,
+        responses: tuple[Response, ...],
     ) -> RubricSet:
+        prompt = self.rubric_prompt_template.format(
+            skill=RUBRIC_GENERATION_SKILL.content,
+            query=json.dumps(
+                self._task_payload(task), ensure_ascii=False, indent=2
+            ),
+            responses=json.dumps(
+                self._responses_payload(responses), ensure_ascii=False, indent=2
+            ),
+        )
+        rubrics = self._parse_rubrics(self.rubric_llm(prompt))
         return RubricSet(
             query_id=task.query_id,
-            rubrics=(),
+            rubrics=rubrics,
             metadata={
                 "method": "init_skill",
-                "online_rubric_generation": False,
-                "skill": EVAL_SKILL.name,
+                "online_rubric_generation": True,
+                "skill": RUBRIC_GENERATION_SKILL.name,
             },
         )
 
@@ -137,14 +195,12 @@ class InitSkillHarness(RewardSystem):
     ) -> WinnerResult:
         prompt = self.judge_prompt_template.format(
             instruction=task.instruction,
-            skill=EVAL_SKILL.content,
+            rubric=json.dumps(
+                self._rubrics_payload(rubrics), ensure_ascii=False, indent=2
+            ),
             response_block=_response_block(responses),
         )
-        return _winner_result(
-            task,
-            responses,
-            self.judge_llm(prompt),
-        )
+        return _winner_result(task, responses, self.judge_llm(prompt))
 
 
 HARNESS_CLASS = InitSkillHarness

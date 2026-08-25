@@ -8,7 +8,7 @@ RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 #   --base-url          vLLM 的 OpenAI-compatible API 地址。
 #   --model             vLLM 暴露的模型名称。
 #   --benchmarks        可选 rewardbench、rmbench、held_in；暂不评测 rewardbench2。
-#   --agents            可选 no_rubric、no_skill、init_skill。
+#   --agents            可选 no_rubric、no_skill、init_skill_no_rubric、init_skill。
 #   --agents-dir        自定义 Agent 文件目录。
 #   --workers           同时处理的 benchmark case 数量。
 #   --request-workers   全局同时发送给 vLLM 的最大请求数。
@@ -29,7 +29,7 @@ python -u -m reward_harness.benchmark \
   --base-url "$VLLM_BASE_URL" \
   --model Qwen/Qwen3-8B \
   --benchmarks rewardbench \
-  --agents no_rubric no_skill init_skill \
+  --agents no_rubric no_skill init_skill_no_rubric init_skill \
   --temperature 0.7 \
   --max-tokens 10000 \
   --workers 32 \

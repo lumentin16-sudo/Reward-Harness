@@ -20,6 +20,7 @@ benchmark:
   baselines:
     - no_rubric
     - no_skill
+    - init_skill_no_rubric
     - init_skill
   metric_path: primary_metrics.beyond_rubric
 

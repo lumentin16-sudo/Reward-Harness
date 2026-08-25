@@ -24,7 +24,8 @@ Reward-Harness/
 │   ├── agents/                     # Reward Harness 实现
 │   │   ├── no_rubric.py            # 官方 vanilla pairwise judging
 │   │   ├── no_skill.py             # 官方 online-rubric pairwise judging
-│   │   └── init_skill.py           # 官方 Skill Prompt + 可优化离线 Skill
+│   │   ├── init_skill_no_rubric.py # 固定 J-stage Skill，不生成 Rubric
+│   │   └── init_skill.py           # G-stage Rubric Skill + response-aware Rubrics
 │   ├── benchmarks/                 # 数据集适配器和官方风格指标
 │   │   ├── base.py                 # BenchmarkCase/BenchmarkAdapter 统一协议
 │   │   ├── rewardbench.py
@@ -146,7 +147,7 @@ python -m reward_harness.benchmark \
 ```bash
 python -m reward_harness.benchmark \
   --benchmarks rewardbench \
-  --agents no_rubric no_skill init_skill \
+  --agents no_rubric no_skill init_skill_no_rubric init_skill \
   --smoke-per-group 0
 ```
 
@@ -189,16 +190,20 @@ bash run_benchmark.sh
 
 先使用官方 Rubric Generation Prompt 根据 Query 在线生成 Rubric，再使用官方 rubric pairwise Prompt 比较完整 A/B 并选择 winner。
 
-### `init_skill`
+### `init_skill_no_rubric`
 
 把可由 Harness Optimization 编辑的离线 Skill 注入官方 skill pairwise Prompt，比较完整 A/B 并选择 winner。
+
+### `init_skill`
+
+把可编辑的 G-stage Rubric Skill 注入 Rubric Model；Rubric Model 同时读取 Query 和完整匿名 Responses，生成结构化、判别性的 RubricSet，再由 Judge 使用这些 Rubrics 比较完整 A/B。
 
 接近原项目 Qwen3-8B 推理设置的运行方式为：
 
 ```bash
 python -m reward_harness.benchmark \
   --benchmarks rewardbench \
-  --agents no_rubric no_skill init_skill \
+  --agents no_rubric no_skill init_skill_no_rubric init_skill \
   --smoke-per-group 0 \
   --trial-num 3 \
   --temperature 0.7 \
@@ -207,7 +212,7 @@ python -m reward_harness.benchmark \
 
 当前 winner-only runner 只使用 pairwise Prompt，支持 RewardBench，以及展开为 9 个 pair 的 RM-Bench。RewardBench 2 暂不参与评测。
 
-每个 Skill 包含 `name`、`stage`、`description` 和 `content`，`stage` 取 `G` 或 `J`。当前 `init_skill` 直接注入一个 J-stage comparative workflow。
+每个 Skill 包含 `name`、`stage`、`description` 和 `content`，`stage` 取 `G` 或 `J`。`init_skill_no_rubric` 注入 J-stage comparative workflow；`init_skill` 注入 G-stage Rubric workflow。
 
 ## RewardSystem 接口
 
@@ -368,7 +373,7 @@ python meta-harness.py --run-name reward-search --status
 
 搜索阶段固定使用 `trial_num=1`，默认优化 `primary_metrics.beyond_rubric`。Average@N 和 Voting@N 应在选出最终 Harness 后，通过独立的正式 benchmark 命令评测。
 
-Harness Optimization 使用单一的 500 条 `held_in` 搜索集。三个 baseline 和每轮所有候选都在同一集合上运行；该集合的指标用于更新 frontier，完整轨迹同时供下一轮 Codex 分析。RewardBench 和 RM-Bench 作为 held-out 数据，不参与搜索阶段。
+Harness Optimization 使用单一的 500 条 `held_in` 搜索集。四个 baseline 和每轮所有候选都在同一集合上运行；该集合的指标用于更新 frontier，完整轨迹同时供下一轮 Codex 分析。RewardBench 和 RM-Bench 作为 held-out 数据，不参与搜索阶段。
 
 因此每轮的调用顺序是：
 

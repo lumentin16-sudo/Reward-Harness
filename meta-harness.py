@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parent
 AGENTS_DIR = ROOT / "reward_harness" / "agents"
 SKILL_PATH = ROOT / ".claude" / "skills" / "meta-harness-reward-skill" / "SKILL.md"
 DEFAULT_STATE_ROOT = ROOT / "meta_runs"
-BASELINES = ("no_rubric", "no_skill", "init_skill")
+BASELINES = ("no_rubric", "no_skill", "init_skill_no_rubric", "init_skill")
 NAME_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}")
 
 _interrupted = False

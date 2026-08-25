@@ -58,16 +58,17 @@ python -m reward_harness.benchmark \
 完整评测需要显式传入 `--smoke-per-group 0`。无需再传 `--resume`，续跑和完整结果跳过
 均已自动启用。
 
-test 分支使用 winner-only 协议，可选择三个具体 Harness：
-`no_rubric`、`no_skill` 和 `init_skill`。它们分别使用用户提供的 Eval-Skill
-`evaluation.py` 中 vanilla、rubric 和 skill pairwise Prompt，并直接输出唯一 winner。
+test 分支使用 winner-only 协议，可选择四个具体 Harness：
+`no_rubric`、`no_skill`、`init_skill_no_rubric` 和 `init_skill`。前三者分别对应
+vanilla、online-rubric 和无 Rubric 的 J-stage Skill；`init_skill` 使用 G-stage
+Rubric Skill 生成 response-aware Rubrics，再直接输出唯一 winner。
 
 复现实验调用参数可使用：
 
 ```bash
 python -m reward_harness.benchmark \
   --benchmarks rewardbench \
-  --agents no_rubric no_skill init_skill \
+  --agents no_rubric no_skill init_skill_no_rubric init_skill \
   --model Qwen/Qwen3-8B \
   --temperature 0.7 \
   --trial-num 3 \
@@ -83,7 +84,7 @@ Runner 当前统一关闭 Qwen3 thinking；请求重试、并发和结果落盘�
 
 ```text
 --benchmarks rewardbench
---agents no_rubric no_skill init_skill
+--agents no_rubric no_skill init_skill_no_rubric init_skill
 --workers 4
 --request-workers 16
 --trial-num 1

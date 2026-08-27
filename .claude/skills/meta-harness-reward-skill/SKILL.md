@@ -9,29 +9,78 @@ Run ONE iteration of reward skill harness evolution. Do all work in the main ses
 
 **You do NOT run benchmarks.** You analyze results + reward trajectories, prototype changes, and implement new systems. The outer loop (`meta_harness.py`) handles benchmarking separately.
 
+## Context
+
+You are evolving comparative Reward Harnesses under `reward_harness/agents/`.
+The default Reward Harness workflow is: first generate shared, response-aware
+rubrics for the Query and the two anonymous Responses, then judge the Responses
+based on the generated rubrics and return one `WinnerResult`. Evaluator-only
+gold labels must never enter model prompts.
+
+The searchable pipeline has two stages:
+
+- G: Generate rubrics first. In `build_rubrics(query, responses)`, inspect the
+  Query and both anonymous Responses, optionally select G-stage Skills, call
+  `rubric_llm`, and return a shared, response-aware `RubricSet` that captures
+  criteria useful for distinguishing the two Responses.
+- J: Judge based on the generated rubrics. In
+  `judge(query, responses, rubrics)`, inspect the Query, both anonymous
+  Responses, and the generated `RubricSet`, optionally select J-stage Skills,
+  call `judge_llm`, compare rubric satisfaction and decisive evidence, and
+  return one winner.
+
+Current baselines:
+
+- `no_rubric.py`: direct pairwise Judge without Rubrics or Skills.
+- `no_skill.py`: online Rubric generation without Skills, then rubric-based pairwise judging.
+- `init_skill_no_rubric.py`: J-stage Skill without Rubric generation.
+- `init_skill.py`: G-stage Skill for response-aware Rubric generation, then rubric-based pairwise judging.
+
+The default search should build from the current frontier or another
+top-performing rubric-based Harness unless the task prompt explicitly asks for
+no-rubric exploration.
+
+You may redesign Skills, prompts, Rubric/Judge workflows, and in-Harness
+control flow. Do not modify benchmark data, model clients, fixed payload and
+parsing helpers, validators, or `reward_system.py`.
+
+Read the baseline Harnesses, `frontier_val.json`, `evolution_summary.jsonl`,
+and recent held-in trajectories before proposing candidates. Frontier tracks
+the best Harness per domain and the best four-domain macro average.
+
 ## Critical Constraints
 
 - You MUST implement 3 new reward skill harnesses every iteration.
 - Do NOT write "the frontier is optimal", "stop iterating", or abort early.
 - ALWAYS complete all steps including prototyping.
 - Design exactly 3 candidates per iteration: at least 1 exploitation of current frontier, at least 1 exploration.
-- Do NOT modify benchmark code, data files, model clients, evaluator logic, or `reward_system.py`.
-- Do NOT modify existing baseline harnesses such as `no_rubric.py`, `no_skill.py`, `init_skill_no_rubric.py`, or `init_skill.py`.
-- Each candidate MUST be a new Python file under `reward_harness/agents/`.
 
-## Anti-Parameter-Tuning Rules
+## Candidate Design
 
-The most common failure mode is creating systems that are just parameter variants of existing ones. Check `evolution_summary.jsonl` for what's been tried — parameter sweeps (rubric counts, skill counts, context budgets, score ranges, weighting constants) almost always regress or tie.
+Each candidate is a single Python file at `reward_harness/agents/<name>.py`
+containing the full Reward Harness. No subdirectories are needed. Define exactly
+one `RewardSystem` subclass or set `HARNESS_CLASS` to the intended subclass.
 
-Bad candidates only tune surface constants:
+What you can and cannot modify:
 
-- Changing "2 to 6 rubrics" to "3 to 7 rubrics" without a mechanism change.
-- Changing winner parsing or confidence wording without a new judging rationale.
-- Renaming skills without changing their function.
-- Reordering prompt bullets.
-- Adding generic phrases such as "be careful" or "think deeply".
+- CAN: edit your new `reward_harness/agents/<name>.py` file freely.
+- CAN: copy a top-performing baseline or frontier Harness into a new file, then make targeted changes.
+- CAN: add, update, or delete G-stage and J-stage Skills inside the new file.
+- CAN: redesign Skill retrieval/selection inside the new file.
+- CAN: redesign rubric-generation prompts, judge prompts, helper functions, and in-Harness control flow inside the new file.
+- CANNOT: modify benchmark code, data files, model clients, evaluator logic, fixed payload/parsing helpers, validators, `reward_system.py`, config files, or existing baseline Harnesses.
 
-Good candidates change a mechanism:
+Design principles:
+
+- Mechanism-first. Identify a specific failure mode from trajectories, then design a change that targets it. Never add changes speculatively.
+- One mechanism per candidate. Each candidate tests exactly one hypothesis. If you are tempted to add "and also...", that is a second candidate.
+- Evidence-driven hypotheses. Each hypothesis must state: observed failure pattern, change, expected mechanism, and risk.
+- Prefer minimal targeted changes to the current frontier. Do not add multi-stage gates, appeals, or verification passes unless the observed failures repeatedly require that extra stage.
+- Do not exploit quirks of the held-in set, benchmark ordering, response labels, parser behavior, prompt formatting, or known answer patterns.
+- Do not hardcode dataset-specific hints. Never mention dataset names in system code, prompts, or comments. General patterns such as "prioritize severe failures" or "balance rubric coverage" are fine.
+- Avoid parameter-only variants. Changing rubric counts, skill counts, context budgets, score ranges, weighting constants, winner parsing wording, prompt bullet order, or generic caution phrases is not a new mechanism by itself.
+
+Good candidates change a mechanism, such as:
 
 - A new skill bank organization.
 - A new rubric-generation workflow.
@@ -42,14 +91,6 @@ Good candidates change a mechanism:
 - Stronger evidence-first scoring.
 - Winner selection that handles hard constraints, severe failures, or near ties.
 - Stage-specific skills for rubric generation vs pairwise judging.
-
-Each candidate should test one primary hypothesis. Avoid adding unrelated "and also" changes in the same file.
-
-## Anti-Overfitting Rules
-
-- No dataset-specific hints. Do not hardcode knowledge about specific datasets. Reward skill harnesses must be general-purpose.
-- Never mention dataset names in system code, prompts, or comments.
-- General patterns are OK. Rules like "prioritize severe failures" or "balance rubric coverage" are fine — they apply broadly.
 
 ## RewardSystem Interface
 
@@ -132,7 +173,8 @@ Check the reports directory (path in the task prompt's "Optimization state" sect
    * `frontier_val.json` — current best on the held-in search metric
    * task prompt benchmark command/config for current benchmarks and baselines
    * recent `results/<run_tag>/<benchmark>/<harness>/<model>/trajectories.jsonl` traces if they exist
-2. Formulate 3 hypotheses — each must be falsifiable and target a different mechanism.
+2. Inspect incorrect or fragile frontier traces first, then compare against nearby systems when useful.
+3. Formulate 3 hypotheses — each must be falsifiable, target a different mechanism, and include: observed failure pattern, change, expected mechanism, and risk.
 
 ### Step 2: Prototype — MANDATORY
 
@@ -171,7 +213,7 @@ Write to the path specified in the task prompt (NOT hardcoded — it may be in a
     {
       "name": "<snake_case_name>",
       "file": "reward_harness/agents/<name>.py",
-      "hypothesis": "<falsifiable claim>",
+      "hypothesis": "<observed failure pattern + change + expected mechanism + risk>",
       "axis": "exploitation|exploration",
       "base_harness": "<what it builds on>",
       "components": ["tag1", "tag2", "..."]
@@ -185,15 +227,6 @@ Output:
 ```text
 CANDIDATES: <name1>, <name2>, <name3>
 ```
-
-## Current Baselines
-
-- `no_rubric.py`: no rubric generation; vanilla pairwise forced-choice Judge.
-- `no_skill.py`: generates a query-specific rubric, then performs rubric-guided pairwise forced-choice without a Skill.
-- `init_skill_no_rubric.py`: injects an editable J-stage evaluation Skill into pairwise forced-choice judging without rubric generation.
-- `init_skill.py`: injects an editable G-stage Rubric Skill into rubric generation, then performs rubric-guided pairwise forced-choice judging.
-
-Usually build candidates from the current frontier or another top-performing base harness unless the task prompt gives a different base.
 
 ## Result Files
 

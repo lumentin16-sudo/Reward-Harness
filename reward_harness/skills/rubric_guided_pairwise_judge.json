@@ -1,0 +1,6 @@
+{
+  "name": "rubric_guided_pairwise_judge",
+  "stage": "J",
+  "description": "Compare two responses against generated rubrics with evidence-first winner selection.",
+  "content": "## Analysis\n1. Reconstruct the user's core intent and binding explicit constraints.\n2. Evaluate Response A and Response B against the generated rubrics, applying only criteria that matter to the Query.\n3. Cite concrete evidence from both responses. Separate hard failures from softer quality differences.\n4. Do not let verbosity, confident tone, or unrequested formatting outweigh correctness, instruction following, safety, or direct usefulness.\n\n## Final Judgment\nAggregate the decisive rubric differences, explain why they determine task success, and select exactly one winner. Never output None, Neither, or a tie."
+}

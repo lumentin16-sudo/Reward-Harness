@@ -1,0 +1,6 @@
+{
+  "name": "pairwise_evaluation_workflow",
+  "stage": "J",
+  "description": "Compare two responses using an evidence-first evaluation workflow without generated rubrics.",
+  "content": "## Analysis\n1. Reconstruct the user's core intent and binding explicit constraints.\n2. Evaluate Response A and Response B independently for correctness, instruction following, relevance, completeness, safety, and clarity, applying only dimensions that matter to the task.\n3. Cite concrete evidence and classify defects by consequence. A fatal or major answer-changing error outweighs multiple stylistic strengths.\n4. Compare the responses directly. Do not reward verbosity, confidence, familiar phrasing, or formatting that the user did not request.\n\n## Final Judgment\nAggregate the decisive differences, explain why they matter to task success, and select exactly one winner. Never output None, Neither, or a tie."
+}

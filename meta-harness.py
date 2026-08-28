@@ -32,7 +32,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent
 SKILL_PATH = ROOT / ".claude" / "skills" / "meta-harness-reward-skill" / "SKILL.md"
 DEFAULT_STATE_ROOT = ROOT / "meta_runs"
-BASELINES = ("no_rubric", "no_skill", "init_skill_no_rubric", "init_skill")
+BASELINES = ("no_skill", "init_skill")
 NAME_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}")
 
 _interrupted = False
@@ -175,6 +175,29 @@ def _iteration(paths: RunPaths) -> int:
     )
 
 
+def _best_skill_using_harness(paths: RunPaths) -> dict[str, Any] | None:
+    """从演化记录里找当前分数最高的 skill-using Harness 作为 proposer base。"""
+
+    comparison_only = {"no_rubric", "no_skill"}
+    best: dict[str, Any] | None = None
+    for row in _read_jsonl(paths.evolution):
+        system = row.get("system")
+        if not isinstance(system, str) or system in comparison_only:
+            continue
+        try:
+            score = float(row.get("avg_val", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if best is None or score > float(best.get("avg_val", -1.0)):
+            best = {
+                "harness": system,
+                "avg_val": score,
+                "scores": row.get("scores", {}),
+                "run_tag": row.get("run_tag"),
+            }
+    return best
+
+
 def _task_prompt(
     paths: RunPaths,
     args: argparse.Namespace,
@@ -188,6 +211,14 @@ def _task_prompt(
     """
 
     held_in_directory = args.data_dir / args.held_in_dataset
+    frontier = _read_json(paths.frontier, {})
+    global_best = frontier.get("_best", {}) if isinstance(frontier, dict) else {}
+    skill_best = _best_skill_using_harness(paths) or {
+        "harness": "init_skill",
+        "avg_val": None,
+        "scores": {},
+        "run_tag": None,
+    }
     return (
         f"Run iteration {iteration} of the Reward-Harness evolution loop.\n\n"
 
@@ -207,6 +238,12 @@ def _task_prompt(
         f"## Optimization state\n"
         f"- Evolution history: `{paths.evolution}`\n"
         f"- Current frontier: `{paths.frontier}`\n"
+        f"- Current global best Harness: "
+        f"`{global_best.get('harness', 'unknown')}` "
+        f"at `{global_best.get('avg_val', 'unknown')}` avg_val\n"
+        f"- Current best skill-using base Harness: "
+        f"`{skill_best.get('harness')}` "
+        f"at `{skill_best.get('avg_val')}` avg_val\n"
         f"- Post-evaluation reports: `{paths.reports}`\n\n"
 
         f"Use the evolution history to locate evaluation traces or summaries. "
@@ -299,7 +336,7 @@ def _check_one_candidate(candidate: dict[str, Any]) -> str | None:
     import_check_code = f"""
 import importlib.util, inspect, sys
 from pathlib import Path
-from reward_harness.reward_system import RewardSystem
+from reward_harness.reward_system import Query, Response, RewardSystem
 path = Path({str(path)!r})
 module_name = 'reward_harness.agents._meta_import_check_{name}'
 spec = importlib.util.spec_from_file_location(module_name, path)
@@ -314,6 +351,18 @@ classes = [explicit] if explicit is not None else [
 ]
 assert len(classes) == 1
 assert not inspect.isabstract(classes[0])
+def _dummy_llm(prompt):
+    return '{{"rubrics": [{{"rubric_id": "r1", "criterion": "The response should satisfy the request."}}]}}'
+harness = classes[0](_dummy_llm, _dummy_llm)
+task = Query(query_id="meta_check", instruction="Answer the user request.", context=None, domain="meta_check", metadata={{}})
+responses = (
+    Response(response_id="a", content="Answer A", metadata={{}}),
+    Response(response_id="b", content="Answer B", metadata={{}}),
+)
+registry = harness.get_skill_registry(task)
+assert registry.skills, 'candidate must expose a non-empty Skill bank'
+selected = harness.retrieve_skills(task, responses, "G") + harness.retrieve_skills(task, responses, "J")
+assert selected, 'candidate must retrieve at least one Skill for G or J'
 print('OK')
 """
     result = _run([sys.executable, "-c", import_check_code], timeout=60)
@@ -494,7 +543,7 @@ def _update_frontier(
     paths: RunPaths,
     results: dict[str, dict[str, Any]],
 ) -> None:
-    """更新四个领域各自的最优 Harness 和领域宏平均最高的全局 Harness。"""
+    """更新各领域最优 Harness 和当前 held-in/search 聚合指标最高的 Harness。"""
 
     frontier = _read_json(paths.frontier, {})
     if not isinstance(frontier, dict):

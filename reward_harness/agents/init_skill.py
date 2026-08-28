@@ -9,50 +9,26 @@ from ..reward_system import (
     Response,
     RewardSystem,
     RubricSet,
-    Skill,
     SkillRegistry,
     WinnerResult,
 )
+from ..skill_store import load_skill_registry, render_skill_block
 
 
 HARNESS_NAME = "init_skill"
-
-
-RUBRIC_GENERATION_SKILL = Skill(
-    name="response_aware_rubric_workflow",
-    stage="G",
-    description=(
-        "Generate task-specific, response-aware criteria that expose the decisive "
-        "quality differences between candidate responses."
-    ),
-    content="""## Workflow
-1. Reconstruct the user's core intent, explicit constraints, and implicit quality
-   requirements from the Query.
-2. Inspect all Responses to identify the concrete differences that could change
-   which response better satisfies the Query.
-3. Convert those differences into atomic, observable criteria. Each criterion
-   must be usable to assess any response independently, even though the response
-   set was used to discover it.
-4. Prioritize correctness, instruction following, completeness, safety, and
-   reasoning only when they are relevant to this Query. Separate hard failures
-   from softer quality distinctions.
-5. Remove redundant, stylistic, position-dependent, or winner-encoding criteria.
-
-## Output Principles
-- Do not mention Response A/B, response order, candidate IDs, or a presumed winner.
-- Do not reward verbosity, formatting, or confident tone unless requested.
-- Use specific decision-relevant wording rather than generic criteria.
-""",
+INITIAL_SKILLS = (
+    "response_aware_rubric_workflow",
+    "rubric_guided_pairwise_judge",
 )
 
 
 RUBRIC_SKILL_PROMPT = """
 You are generating a shared evaluation rubric for a comparative reward model.
-Follow the supplied Rubric Skill exactly.
+Follow the selected Rubric Skills exactly.
 
-Rubric Skill:
-{skill}
------------------END OF THE SKILL------------------
+Selected Rubric Skills:
+{skills}
+-----------------END OF THE SKILLS------------------
 
 Public Query:
 {query}
@@ -80,6 +56,12 @@ RUBRIC_JUDGE_PROMPT = """
 You are a fair and impartial judge. Compare Response A and Response B under the
 shared response-aware rubric and select the single response that best satisfies
 the user's instruction. You must select exactly one winner.
+
+Follow the selected Judge Skills exactly.
+
+Selected Judge Skills:
+{skills}
+-----------------END OF THE SKILLS------------------
 
 Evaluate decisive hard failures before softer quality differences. Do not let a
 minor criterion override the user's core intent. Cite concrete evidence from both
@@ -148,7 +130,6 @@ def _winner_result(
             "winner_label": label,
             "comparison": "pairwise_forced_choice",
             "method": "init_skill",
-            "rubric_skill": RUBRIC_GENERATION_SKILL.name,
         },
     )
 
@@ -160,15 +141,17 @@ class InitSkillHarness(RewardSystem):
     judge_prompt_template = RUBRIC_JUDGE_PROMPT
 
     def get_skill_registry(self, task: Query) -> SkillRegistry:
-        return SkillRegistry((RUBRIC_GENERATION_SKILL,))
+        del task
+        return load_skill_registry(INITIAL_SKILLS)
 
     def build_rubrics(
         self,
         task: Query,
         responses: tuple[Response, ...],
     ) -> RubricSet:
+        selected_skills = self.retrieve_skills(task, responses, "G")
         prompt = self.rubric_prompt_template.format(
-            skill=RUBRIC_GENERATION_SKILL.content,
+            skills=render_skill_block(selected_skills),
             query=json.dumps(
                 self._task_payload(task), ensure_ascii=False, indent=2
             ),
@@ -183,7 +166,7 @@ class InitSkillHarness(RewardSystem):
             metadata={
                 "method": "init_skill",
                 "online_rubric_generation": True,
-                "skill": RUBRIC_GENERATION_SKILL.name,
+                "skills": [skill.name for skill in selected_skills],
             },
         )
 
@@ -193,7 +176,9 @@ class InitSkillHarness(RewardSystem):
         responses: tuple[Response, ...],
         rubrics: RubricSet,
     ) -> WinnerResult:
+        selected_skills = self.retrieve_skills(task, responses, "J")
         prompt = self.judge_prompt_template.format(
+            skills=render_skill_block(selected_skills),
             instruction=task.instruction,
             rubric=json.dumps(
                 self._rubrics_payload(rubrics), ensure_ascii=False, indent=2

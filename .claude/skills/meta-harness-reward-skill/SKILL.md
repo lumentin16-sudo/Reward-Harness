@@ -29,24 +29,34 @@ The searchable pipeline has two stages:
   call `judge_llm`, compare rubric satisfaction and decisive evidence, and
   return one winner.
 
-Current baselines:
+Available baseline/reference Harnesses:
 
 - `no_rubric.py`: direct pairwise Judge without Rubrics or Skills.
 - `no_skill.py`: online Rubric generation without Skills, then rubric-based pairwise judging.
 - `init_skill_no_rubric.py`: J-stage Skill without Rubric generation.
 - `init_skill.py`: G-stage Skill for response-aware Rubric generation, then rubric-based pairwise judging.
 
+The active baselines and benchmarks for the current run are defined by the
+task prompt and `config.yaml`; do not assume every reference Harness is active
+in the current search.
+`no_skill.py` is a comparison baseline, not the preferred base for skill
+evolution. If `no_skill.py` is the global frontier, build candidates from the
+best skill-using Harness reported in the task prompt or evolution history.
+
 The default search should build from the current frontier or another
 top-performing rubric-based Harness unless the task prompt explicitly asks for
 no-rubric exploration.
 
-You may redesign Skills, prompts, Rubric/Judge workflows, and in-Harness
-control flow. Do not modify benchmark data, model clients, fixed payload and
-parsing helpers, validators, or `reward_system.py`.
+You may add new Skills, redesign Skill retrieval/selection, prompts,
+Rubric/Judge workflows, and in-Harness control flow inside new candidate
+Harnesses. Do not modify benchmark data, model clients, fixed payload and
+parsing helpers, validators, `reward_system.py`, config files, existing
+baseline Harnesses, or existing Skill files.
 
 Read the baseline Harnesses, `frontier_val.json`, `evolution_summary.jsonl`,
-and recent held-in trajectories before proposing candidates. Frontier tracks
-the best Harness per domain and the best four-domain macro average.
+and recent held-in trajectories before proposing candidates. `frontier_val.json`
+tracks the best Harness per reported domain plus the best aggregate `avg_val`
+for the current held-in/search benchmark configuration.
 
 ## Critical Constraints
 
@@ -54,20 +64,29 @@ the best Harness per domain and the best four-domain macro average.
 - Do NOT write "the frontier is optimal", "stop iterating", or abort early.
 - ALWAYS complete all steps including prototyping.
 - Design exactly 3 candidates per iteration: at least 1 exploitation of current frontier, at least 1 exploration.
+- Every candidate MUST use the Skill bank. Do not submit candidates whose `get_skill_registry()` returns an empty `SkillRegistry`.
+- Every candidate MUST add at least one new G-stage or J-stage Skill JSON file, then use retrieval to decide when to inject it.
 
 ## Candidate Design
 
-Each candidate is a single Python file at `reward_harness/agents/<name>.py`
-containing the full Reward Harness. No subdirectories are needed. Define exactly
-one `RewardSystem` subclass or set `HARNESS_CLASS` to the intended subclass.
+Each candidate has one Python file at `reward_harness/agents/<name>.py`
+containing the full Reward Harness control flow. Skills are independent JSON
+files in the shared bank under `reward_harness/skills/*.json`; the candidate
+decides which Skills to retrieve before G and J. Define exactly one
+`RewardSystem` subclass or set `HARNESS_CLASS` to the intended subclass.
+The Skill bank is append-only for optimization: preserve existing Skill files
+so evaluated Harnesses remain reproducible. Add new Skills when needed, and
+put selection responsibility in `retrieve_skills(...)`.
 
 What you can and cannot modify:
 
 - CAN: edit your new `reward_harness/agents/<name>.py` file freely.
 - CAN: copy a top-performing baseline or frontier Harness into a new file, then make targeted changes.
-- CAN: add, update, or delete G-stage and J-stage Skills inside the new file.
-- CAN: redesign Skill retrieval/selection inside the new file.
+- CAN: add new G-stage and J-stage Skill JSON files under `reward_harness/skills/`.
+- CAN: redesign Skill retrieval/selection inside the new Harness file.
 - CAN: redesign rubric-generation prompts, judge prompts, helper functions, and in-Harness control flow inside the new file.
+- CANNOT: modify, overwrite, rename, or delete existing Skill JSON files.
+- CANNOT: hide new reusable judging or rubric-generation experience only as inline prompt text. If the idea is a reusable workflow instruction, add it as a new Skill and retrieve it.
 - CANNOT: modify benchmark code, data files, model clients, evaluator logic, fixed payload/parsing helpers, validators, `reward_system.py`, config files, or existing baseline Harnesses.
 
 Design principles:
@@ -75,14 +94,17 @@ Design principles:
 - Mechanism-first. Identify a specific failure mode from trajectories, then design a change that targets it. Never add changes speculatively.
 - One mechanism per candidate. Each candidate tests exactly one hypothesis. If you are tempted to add "and also...", that is a second candidate.
 - Evidence-driven hypotheses. Each hypothesis must state: observed failure pattern, change, expected mechanism, and risk.
-- Prefer minimal targeted changes to the current frontier. Do not add multi-stage gates, appeals, or verification passes unless the observed failures repeatedly require that extra stage.
+- Error attribution before editing. For each candidate, first decide whether the target failures come from Skill retrieval, rubric generation, rubric quality, rubric-guided judging, aggregation/comparison logic, output parsing, or prompt/control-flow issues.
+- Skill-first. Treat Skills as an append-only bank of reusable workflow instructions. New trajectory-derived experience should enter the Skill bank, then the candidate should retrieve/select relevant G-stage Skills before rubric generation and relevant J-stage Skills before judging.
+- Prefer minimal targeted changes to the current frontier or another top-performing base Harness. Do not add multi-stage gates, appeals, or verification passes unless the observed failures repeatedly require that extra stage.
 - Do not exploit quirks of the held-in set, benchmark ordering, response labels, parser behavior, prompt formatting, or known answer patterns.
 - Do not hardcode dataset-specific hints. Never mention dataset names in system code, prompts, or comments. General patterns such as "prioritize severe failures" or "balance rubric coverage" are fine.
 - Avoid parameter-only variants. Changing rubric counts, skill counts, context budgets, score ranges, weighting constants, winner parsing wording, prompt bullet order, or generic caution phrases is not a new mechanism by itself.
 
 Good candidates change a mechanism, such as:
 
-- A new skill bank organization.
+- A new trajectory-derived G-stage or J-stage Skill plus a retrieval rule that decides when to use it.
+- A new Skill retrieval or selection mechanism over existing and newly added Skills.
 - A new rubric-generation workflow.
 - A new judge-skill-selection strategy.
 - Response-set-aware rubric discovery that improves head-to-head discrimination.
@@ -111,6 +133,13 @@ class RewardSystem(ABC):
     def judge_llm(self) -> LLMCallable: ...
 
     def get_skill_registry(self, task: Query) -> SkillRegistry: ...
+
+    def retrieve_skills(
+        self,
+        task: Query,
+        responses: tuple[Response, ...],
+        stage: SkillStage,
+    ) -> tuple[Skill, ...]: ...
 
     def build_rubrics(
         self,
@@ -141,6 +170,8 @@ class RewardSystem(ABC):
 Extend `RewardSystem` from `..reward_system`
 Import `LLMCallable`, `Query`, `Response`, `Rubric`, `RubricJudgment`, `RubricSet`, `Skill`, `SkillStage`, `SkillRegistry`, and `WinnerResult` from `..reward_system`
 `Skill` requires `name`, `stage`, `description`, and `content`; stage must be `"G"` or `"J"`
+Use `load_skill_registry(...)` from `..skill_store` to load independent Skill files from `reward_harness/skills/*.json`
+Use `retrieve_skills(task, responses, "G")` before rubric generation and `retrieve_skills(task, responses, "J")` before judging when Skills are used
 Use `registry.for_stage("G")` or `registry.for_stage("J")` before skill selection when a stage-specific skill pool is needed
 Use `self._task_payload(task)` for public task payloads
 Use `self._candidate_payload(candidate)` for single-response judge payloads
@@ -155,6 +186,7 @@ Do NOT override `_task_payload`, `_candidate_payload`, `_responses_payload`, `_j
 The benchmark/evaluator calls `_validate_rubric_set` and `_validate_winner_result`; candidates should satisfy these checks rather than bypass them
 Use `self.rubric_llm(prompt)` for rubric generation calls (NOT `self._rubric_llm` directly)
 Use `self.judge_llm(prompt)` for comparative judging calls (NOT `self._judge_llm` directly)
+Use `select_stage_skills(...)` and `render_skill_block(...)` from `..skill_store` when a candidate needs LLM-based Skill selection and prompt injection
 `build_rubrics` and `judge` must work without any prior learning (cold start)
 
 ## Workflow
@@ -173,8 +205,9 @@ Check the reports directory (path in the task prompt's "Optimization state" sect
    * `frontier_val.json` — current best on the held-in search metric
    * task prompt benchmark command/config for current benchmarks and baselines
    * recent `results/<run_tag>/<benchmark>/<harness>/<model>/trajectories.jsonl` traces if they exist
-2. Inspect incorrect or fragile frontier traces first, then compare against nearby systems when useful.
-3. Formulate 3 hypotheses — each must be falsifiable, target a different mechanism, and include: observed failure pattern, change, expected mechanism, and risk.
+2. Identify the current frontier/base Harness from `frontier_val.json` and inspect its source file before editing.
+3. Inspect incorrect or fragile trajectories first, then compare against nearby systems when useful. For each failure pattern, attribute the likely failure source: Skill retrieval, rubric generation, rubric quality, rubric-guided judging, aggregation/comparison logic, output parsing, or prompt/control-flow.
+4. Formulate 3 hypotheses — each must be falsifiable, target a different mechanism, and include: observed failure pattern, attributed failure source, change, expected mechanism, and risk.
 
 ### Step 2: Prototype — MANDATORY
 
@@ -192,9 +225,10 @@ For each candidate:
 For each of the 3 candidates:
 
 1. Copy a top-performing base harness to `reward_harness/agents/<name>.py`, then make targeted modifications. This copy-then-edit approach ensures correct imports and proven patterns.
-2. Implement the new mechanism according to your hypothesis.
-3. Self-critique (mandatory): After implementing, re-read the file and check: does this harness introduce a genuinely NEW mechanism, or is it just a parameter variant? If the logic in `get_skill_registry()`, `build_rubrics()`, and `judge()` is identical to the base except for constants, REWRITE with a truly novel mechanism.
-4. Import/interface check:
+2. Add at least one new independent Skill JSON file under `reward_harness/skills/`. Do not edit or delete existing Skill files.
+3. Implement the new mechanism according to your hypothesis.
+4. Self-critique (mandatory): After implementing, re-read the file and check: does this harness introduce a genuinely NEW mechanism, or is it just a parameter variant? If the logic in `get_skill_registry()`, `build_rubrics()`, and `judge()` is identical to the base except for constants, REWRITE with a truly novel mechanism.
+5. Import/interface check:
 
 ```bash
 python3 -c "from reward_harness.agents.<name> import *; print('OK')"
@@ -213,7 +247,7 @@ Write to the path specified in the task prompt (NOT hardcoded — it may be in a
     {
       "name": "<snake_case_name>",
       "file": "reward_harness/agents/<name>.py",
-      "hypothesis": "<observed failure pattern + change + expected mechanism + risk>",
+      "hypothesis": "<observed failure pattern + attributed failure source + change + expected mechanism + risk>",
       "axis": "exploitation|exploration",
       "base_harness": "<what it builds on>",
       "components": ["tag1", "tag2", "..."]

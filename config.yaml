@@ -18,15 +18,13 @@ benchmark:
   benchmarks:
     - held_in
   baselines:
-    - no_rubric
     - no_skill
-    - init_skill_no_rubric
     - init_skill
   # Harness Optimization 搜索阶段固定 trial_num=1。
   temperature: 0.7
   max_tokens: 10000
-  workers: 32
-  request_workers: 32
+  workers: 12
+  request_workers: 12
   smoke_per_group: 0
   sample_size: 0
   seed: 42

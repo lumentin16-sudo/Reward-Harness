@@ -8,9 +8,9 @@
 4. 校验 Harness 输出、Rubric 覆盖关系和最终奖励；
 5. 保持业务结果可序列化，完整执行轨迹由 benchmark runner 统一记录。
 
-候选 Harness 的搜索边界有三个公开接口：``get_skill_registry``、
-``build_rubrics`` 和 ``judge``。Judge 一次看到完整 Responses 并直接返回唯一
-winner，不再暴露独立的逐回答评分和奖励聚合接口。
+候选 Harness 的搜索边界有四个公开接口：``get_skill_registry``、
+``retrieve_skills``、``build_rubrics`` 和 ``judge``。Judge 一次看到完整
+Responses 并直接返回唯一 winner，不再暴露独立的逐回答评分和奖励聚合接口。
 """
 
 from __future__ import annotations
@@ -368,6 +368,7 @@ class RewardSystem(ABC):
 
     可搜索部分：
         - ``get_skill_registry``：Skill 的内容、数量和组织方式；
+        - ``retrieve_skills``：根据 Query、Responses 和 G/J 阶段选择 Skill；
         - ``build_rubrics``：Rubric Prompt、Skill 选择和 G 调用流程；
         - ``judge``：完整 Responses 上的比较 Prompt、Skill 选择和 winner 输出。
 
@@ -421,7 +422,22 @@ class RewardSystem(ABC):
 
     @abstractmethod
     def get_skill_registry(self, task: Query) -> SkillRegistry:
-        """候选接口 1：返回 workflow Skill；不使用 Skill 时返回空 Registry。"""
+        """候选接口 1：返回当前 Harness 可用的 Skill bank。"""
+
+    def retrieve_skills(
+        self,
+        task: Query,
+        responses: tuple[Response, ...],
+        stage: SkillStage,
+    ) -> tuple[Skill, ...]:
+        """候选接口 2：为一次 G/J 调用选择要注入的 Skills。
+
+        默认实现只按阶段返回全部可用 Skill。需要 query/response-aware 检索时，
+        candidate 可以覆盖这个方法。
+        """
+
+        del responses
+        return self.get_skill_registry(task).for_stage(stage).skills
 
     @abstractmethod
     def build_rubrics(
@@ -429,7 +445,7 @@ class RewardSystem(ABC):
         task: Query,
         responses: tuple[Response, ...],
     ) -> RubricSet:
-        """候选接口 2（G）：根据 Query 和匿名 Responses 生成共享 Rubric。"""
+        """候选接口 3（G）：根据 Query 和匿名 Responses 生成共享 Rubric。"""
 
     @abstractmethod
     def judge(
@@ -438,7 +454,7 @@ class RewardSystem(ABC):
         responses: tuple[Response, ...],
         rubrics: RubricSet,
     ) -> WinnerResult:
-        """候选接口 3（J）：比较完整 Responses 并返回唯一 winner。"""
+        """候选接口 4（J）：比较完整 Responses 并返回唯一 winner。"""
 
     @staticmethod
     @final

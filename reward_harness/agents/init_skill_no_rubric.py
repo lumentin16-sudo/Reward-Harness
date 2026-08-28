@@ -7,22 +7,25 @@ from ..reward_system import (
     Response,
     RewardSystem,
     RubricSet,
-    Skill,
     SkillRegistry,
     WinnerResult,
 )
+from ..skill_store import load_skill_registry, render_skill_block
+
+
 HARNESS_NAME = "init_skill_no_rubric"
+INITIAL_SKILLS = ("pairwise_evaluation_workflow",)
 
 
 SKILL_PAIRWISE_JUDGE_PROMPT = """
 You are a fair and impartial judge. Your task is to evaluate 'Response A' and 'Response B' based on a given instruction to select the single best response.
 **NOTE**: You must select a winner. Never respond with "None" or "Neither" as the winner.
 
-You may use the Skill derived from other successful examples, as references if helpful.
+You may use the selected Judge Skills derived from other successful examples, as references if helpful.
 
-**Skill:**
-{skill}
------------------END OF THE SKILL------------------
+Selected Judge Skills:
+{skills}
+-----------------END OF THE SKILLS------------------
 
 ### REQUIRED OUTPUT FORMAT
 You must follow this exact output format below. Conduct your detailed analysis in the `Analysis` section, following the exact structure, workflow, and instructions defined in the **Skill**, and finally give your decision in the `Final Judgment` section.
@@ -87,34 +90,14 @@ def _winner_result(
     )
 
 
-EVAL_SKILL = Skill(
-    name="pairwise_evaluation_workflow",
-    stage="J",
-    description="Compare two responses using an evidence-first evaluation workflow.",
-    content="""## Analysis
-1. Reconstruct the user's core intent and binding explicit constraints.
-2. Evaluate Response A and Response B independently for correctness,
-   instruction following, relevance, completeness, safety, and clarity, applying
-   only dimensions that matter to the task.
-3. Cite concrete evidence and classify defects by consequence. A fatal or major
-   answer-changing error outweighs multiple stylistic strengths.
-4. Compare the responses directly. Do not reward verbosity, confidence,
-   familiar phrasing, or formatting that the user did not request.
-
-## Final Judgment
-Aggregate the decisive differences, explain why they matter to task success,
-and select exactly one winner. Never output None, Neither, or a tie.
-""",
-)
-
-
 class InitSkillNoRubricHarness(RewardSystem):
     """把可由 Harness Optimization 编辑的离线 Skill 注入官方 Judge Prompt。"""
 
     judge_prompt_template = SKILL_PAIRWISE_JUDGE_PROMPT
 
     def get_skill_registry(self, task: Query) -> SkillRegistry:
-        return SkillRegistry((EVAL_SKILL,))
+        del task
+        return load_skill_registry(INITIAL_SKILLS)
 
     def build_rubrics(
         self, task: Query, responses: tuple[Response, ...]
@@ -125,7 +108,10 @@ class InitSkillNoRubricHarness(RewardSystem):
             metadata={
                 "method": "init_skill_no_rubric",
                 "online_rubric_generation": False,
-                "skill": EVAL_SKILL.name,
+                "skills": [
+                    skill.name
+                    for skill in self.retrieve_skills(task, responses, "J")
+                ],
             },
         )
 
@@ -135,9 +121,10 @@ class InitSkillNoRubricHarness(RewardSystem):
         responses: tuple[Response, ...],
         rubrics: RubricSet,
     ) -> WinnerResult:
+        selected_skills = self.retrieve_skills(task, responses, "J")
         prompt = self.judge_prompt_template.format(
             instruction=task.instruction,
-            skill=EVAL_SKILL.content,
+            skills=render_skill_block(selected_skills),
             response_block=_response_block(responses),
         )
         return _winner_result(

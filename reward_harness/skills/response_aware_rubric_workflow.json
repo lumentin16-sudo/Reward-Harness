@@ -1,0 +1,6 @@
+{
+  "name": "response_aware_rubric_workflow",
+  "stage": "G",
+  "description": "Generate task-specific, response-aware criteria that expose the decisive quality differences between candidate responses.",
+  "content": "## Workflow\n1. Reconstruct the user's core intent, explicit constraints, and implicit quality requirements from the Query.\n2. Inspect all Responses to identify the concrete differences that could change which response better satisfies the Query.\n3. Convert those differences into atomic, observable criteria. Each criterion must be usable to assess any response independently, even though the response set was used to discover it.\n4. Prioritize correctness, instruction following, completeness, safety, and reasoning only when they are relevant to this Query. Separate hard failures from softer quality distinctions.\n5. Remove redundant, stylistic, position-dependent, or winner-encoding criteria.\n\n## Output Principles\n- Do not mention Response A/B, response order, candidate IDs, or a presumed winner.\n- Do not reward verbosity, formatting, or confident tone unless requested.\n- Use specific decision-relevant wording rather than generic criteria."
+}

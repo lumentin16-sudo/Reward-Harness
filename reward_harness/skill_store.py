@@ -1,12 +1,18 @@
-"""Filesystem-backed Skill loading and lightweight selection helpers."""
+"""Filesystem-backed Skill loading and prompt-injection helpers.
+
+This is a stable, mechanical layer over ``reward_system``: it only loads Skills
+from ``reward_harness/skills/*.json`` and renders them into prompt text. Skill
+retrieval/selection policy belongs in the candidate Harness (see
+``agents/init_skill.py`` for a reference implementation), not here.
+"""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Iterable
 
-from .reward_system import JSONValue, Skill, SkillRegistry, SkillStage
+from .reward_system import Skill, SkillRegistry
 
 
 SKILL_ROOT = Path(__file__).resolve().parent / "skills"
@@ -52,47 +58,3 @@ def render_skill_block(skills: tuple[Skill, ...]) -> str:
     return "\n\n".join(
         f"## Skill: {skill.name}\n{skill.content.strip()}" for skill in skills
     )
-
-
-def select_stage_skills(
-    *,
-    registry: SkillRegistry,
-    stage: SkillStage,
-    query_payload: dict[str, JSONValue],
-    responses_payload: list[dict[str, JSONValue]],
-    llm: Callable[[str], str],
-    parse_skill_calls: Callable[[str, SkillRegistry], tuple[str, ...]],
-    max_skills: int = 2,
-) -> tuple[Skill, ...]:
-    """Select relevant Skills for one G/J stage.
-
-    When the stage has at most ``max_skills`` Skills, return all of them without
-    an extra model call. Larger banks use the stage LLM to retrieve by name from
-    the catalog, while parser failures fall back to the first available Skills so
-    the harness remains usable from cold start.
-    """
-
-    stage_registry = registry.for_stage(stage)
-    if not stage_registry.skills:
-        return ()
-    if len(stage_registry.skills) <= max_skills:
-        return stage_registry.skills
-
-    prompt = f"""Select up to {max_skills} workflow Skills for stage {stage}.
-Return exactly one JSON object: {{"skill_calls": ["skill_name"]}}
-
-Skill catalog:
-{json.dumps(stage_registry.catalog, ensure_ascii=False, indent=2)}
-
-Public query:
-{json.dumps(query_payload, ensure_ascii=False, indent=2)}
-
-Anonymous responses:
-{json.dumps(responses_payload, ensure_ascii=False, indent=2)}
-""".strip()
-    try:
-        names = parse_skill_calls(llm(prompt), stage_registry)
-    except ValueError:
-        names = ()
-    selected = [skill for skill in stage_registry.skills if skill.name in names]
-    return tuple(selected[:max_skills] or stage_registry.skills[:max_skills])

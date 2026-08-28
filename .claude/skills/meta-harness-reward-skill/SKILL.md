@@ -50,7 +50,7 @@ no-rubric exploration.
 You may add new Skills, redesign Skill retrieval/selection, prompts,
 Rubric/Judge workflows, and in-Harness control flow inside new candidate
 Harnesses. Do not modify benchmark data, model clients, fixed payload and
-parsing helpers, validators, `reward_system.py`, config files, existing
+parsing helpers, validators, `reward_system.py`, `skill_store.py`, config files, existing
 baseline Harnesses, or existing Skill files.
 
 Read the baseline Harnesses, `frontier_val.json`, `evolution_summary.jsonl`,
@@ -87,7 +87,7 @@ What you can and cannot modify:
 - CAN: redesign rubric-generation prompts, judge prompts, helper functions, and in-Harness control flow inside the new file.
 - CANNOT: modify, overwrite, rename, or delete existing Skill JSON files.
 - CANNOT: hide new reusable judging or rubric-generation experience only as inline prompt text. If the idea is a reusable workflow instruction, add it as a new Skill and retrieve it.
-- CANNOT: modify benchmark code, data files, model clients, evaluator logic, fixed payload/parsing helpers, validators, `reward_system.py`, config files, or existing baseline Harnesses.
+- CANNOT: modify benchmark code, data files, model clients, evaluator logic, fixed payload/parsing helpers, validators, `reward_system.py`, `skill_store.py`, config files, or existing baseline Harnesses.
 
 Design principles:
 
@@ -186,7 +186,7 @@ Do NOT override `_task_payload`, `_candidate_payload`, `_responses_payload`, `_j
 The benchmark/evaluator calls `_validate_rubric_set` and `_validate_winner_result`; candidates should satisfy these checks rather than bypass them
 Use `self.rubric_llm(prompt)` for rubric generation calls (NOT `self._rubric_llm` directly)
 Use `self.judge_llm(prompt)` for comparative judging calls (NOT `self._judge_llm` directly)
-Use `select_stage_skills(...)` and `render_skill_block(...)` from `..skill_store` when a candidate needs LLM-based Skill selection and prompt injection
+Use `render_skill_block(...)` from `..skill_store` for prompt injection; implement Skill retrieval/selection policy directly in `retrieve_skills(...)` (see `agents/init_skill.py` for a reference)
 `build_rubrics` and `judge` must work without any prior learning (cold start)
 
 ## Workflow

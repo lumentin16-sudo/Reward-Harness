@@ -9,7 +9,9 @@ from ..reward_system import (
     Response,
     RewardSystem,
     RubricSet,
+    Skill,
     SkillRegistry,
+    SkillStage,
     WinnerResult,
 )
 from ..skill_store import load_skill_registry, render_skill_block
@@ -20,6 +22,7 @@ INITIAL_SKILLS = (
     "response_aware_rubric_workflow",
     "rubric_guided_pairwise_judge",
 )
+MAX_SELECTED_SKILLS = 1
 
 
 RUBRIC_SKILL_PROMPT = """
@@ -143,6 +146,38 @@ class InitSkillHarness(RewardSystem):
     def get_skill_registry(self, task: Query) -> SkillRegistry:
         del task
         return load_skill_registry(INITIAL_SKILLS)
+
+    def retrieve_skills(
+        self,
+        task: Query,
+        responses: tuple[Response, ...],
+        stage: SkillStage,
+    ) -> tuple[Skill, ...]:
+        """按 stage 检索 Skill:池子小时全量,池子大时让 LLM 按 catalog 选。"""
+
+        registry = self.get_skill_registry(task).for_stage(stage)
+        if len(registry.skills) <= MAX_SELECTED_SKILLS:
+            return registry.skills
+
+        llm = self.rubric_llm if stage == "G" else self.judge_llm
+        prompt = f"""Select up to {MAX_SELECTED_SKILLS} workflow Skills for stage {stage}.
+Return exactly one JSON object: {{"skill_calls": ["skill_name"]}}
+
+Skill catalog:
+{json.dumps(registry.catalog, ensure_ascii=False, indent=2)}
+
+Public query:
+{json.dumps(self._task_payload(task), ensure_ascii=False, indent=2)}
+
+Anonymous responses:
+{json.dumps(self._responses_payload(responses), ensure_ascii=False, indent=2)}
+""".strip()
+        try:
+            names = self._parse_skill_calls(llm(prompt), registry)
+        except ValueError:
+            names = ()
+        selected = [skill for skill in registry.skills if skill.name in names]
+        return tuple(selected[:MAX_SELECTED_SKILLS] or registry.skills[:MAX_SELECTED_SKILLS])
 
     def build_rubrics(
         self,

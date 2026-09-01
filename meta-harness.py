@@ -361,8 +361,10 @@ responses = (
 )
 registry = harness.get_skill_registry(task)
 assert registry.skills, 'candidate must expose a non-empty Skill bank'
-harness.retrieve_skills(task, responses, "G")
-harness.retrieve_skills(task, responses, "J")
+selected_g = harness.retrieve_skills(task, responses, "G")
+selected_j = harness.retrieve_skills(task, responses, "J")
+assert selected_g, 'candidate must retrieve at least one G-stage Skill'
+assert selected_j, 'candidate must retrieve at least one J-stage Skill'
 print('OK')
 """
     result = _run([sys.executable, "-c", import_check_code], timeout=60)

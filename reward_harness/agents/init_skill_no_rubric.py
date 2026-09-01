@@ -14,7 +14,7 @@ from ..skill_store import load_skill_registry, render_skill_block
 
 
 HARNESS_NAME = "init_skill_no_rubric"
-INITIAL_SKILLS = ("pairwise_evaluation_workflow",)
+INITIAL_SKILLS: tuple[str, ...] = ()
 
 
 SKILL_PAIRWISE_JUDGE_PROMPT = """

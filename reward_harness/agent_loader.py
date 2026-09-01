@@ -7,6 +7,7 @@ import importlib.util
 import inspect
 import sys
 from dataclasses import dataclass
+from collections.abc import Collection
 from pathlib import Path
 
 from .reward_system import RewardSystem
@@ -25,7 +26,10 @@ class HarnessSpec:
     source_sha256: str
 
 
-def discover_harnesses(agents_dir: Path = DEFAULT_AGENTS_DIR) -> list[HarnessSpec]:
+def discover_harnesses(
+    agents_dir: Path = DEFAULT_AGENTS_DIR,
+    include_names: Collection[str] | None = None,
+) -> list[HarnessSpec]:
     """扫描每个 ``*.py``，要求文件内恰好定义一个 RewardSystem 子类。"""
 
     directory = agents_dir.resolve()
@@ -35,6 +39,8 @@ def discover_harnesses(agents_dir: Path = DEFAULT_AGENTS_DIR) -> list[HarnessSpe
     discovered: list[HarnessSpec] = []
     for path in sorted(directory.glob("*.py")):
         if path.stem == "__init__" or path.stem.startswith("_"):
+            continue
+        if include_names is not None and path.stem not in include_names:
             continue
         source = path.read_bytes()
         digest = hashlib.sha256(source).hexdigest()

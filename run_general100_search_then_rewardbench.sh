@@ -3,12 +3,12 @@ set -euo pipefail
 
 VLLM_BASE_URL="${VLLM_BASE_URL:-http://127.0.0.1:8000/v1}"
 MODEL="${MODEL:-Qwen/Qwen3-8B}"
-RUN_NAME="${RUN_NAME:-reward-search-general100}"
-DATA_DIR="${DATA_DIR:-data_general100}"
+RUN_NAME="${RUN_NAME:-reward-search-g50-code25-stem25}"
+DATA_DIR="${DATA_DIR:-data_g50_code25_stem25}"
 SOURCE_DATA="${SOURCE_DATA:-data/held_in/train.jsonl}"
 LOG_DIR="${LOG_DIR:-logs}"
 LOG_FILE="${LOG_FILE:-$LOG_DIR/${RUN_NAME}.log}"
-ITERATIONS="${ITERATIONS:-10}"
+ITERATIONS="${ITERATIONS:-15}"
 WORKERS="${WORKERS:-12}"
 REQUEST_WORKERS="${REQUEST_WORKERS:-12}"
 MAX_TOKENS="${MAX_TOKENS:-10000}"
@@ -23,7 +23,7 @@ echo "run_name=$RUN_NAME model=$MODEL base_url=$VLLM_BASE_URL"
 echo "[$(date '+%F %T')] Checking vLLM..."
 curl -fsS "$VLLM_BASE_URL/models" >/dev/null
 
-echo "[$(date '+%F %T')] Preparing general-only held-in data..."
+echo "[$(date '+%F %T')] Preparing held-in data: general=50, code=25, stem=25..."
 mkdir -p "$DATA_DIR/held_in"
 python - <<'PY'
 import json
@@ -36,20 +36,32 @@ from reward_harness.reward_system import Query, Response
 source = Path(os.environ.get("SOURCE_DATA", "data/held_in/train.jsonl"))
 data_dir = Path(os.environ.get("DATA_DIR", "data_general100"))
 seed = int(os.environ.get("SEED", "42"))
+targets = {
+    "general": 50,
+    "code": 25,
+    "stem": 25,
+}
 
-rows = []
+rows_by_group = {group: [] for group in targets}
 for line in source.read_text(encoding="utf-8").splitlines():
     if not line.strip():
         continue
     obj = json.loads(line)
     group = str(obj.get("group") or obj.get("task", {}).get("domain") or "").lower()
-    if group == "general":
-        rows.append(obj)
+    if group in rows_by_group:
+        rows_by_group[group].append(obj)
 
-if len(rows) < 100:
-    raise SystemExit(f"Need at least 100 general rows, found {len(rows)} in {source}")
+rng = random.Random(seed)
+rows = []
+for group, count in targets.items():
+    available = rows_by_group[group]
+    if len(available) < count:
+        raise SystemExit(
+            f"Need at least {count} {group} rows, found {len(available)} in {source}"
+        )
+    rows.extend(rng.sample(available, count))
 
-rows = random.Random(seed).sample(rows, 100)
+rng.shuffle(rows)
 cases = []
 for row in rows:
     cases.append(
@@ -65,10 +77,10 @@ for row in rows:
 write_processed_cases(
     data_dir,
     benchmark="held_in",
-    dataset_id="helpsteer3-general100",
+    dataset_id="helpsteer3-g50-code25-stem25",
     split="train",
     cases=cases,
-    source_fingerprint=f"general100-from-{source}-seed{seed}",
+    source_fingerprint=f"g50-code25-stem25-from-{source}-seed{seed}",
     force=True,
 )
 print(f"wrote {data_dir / 'held_in' / 'train.jsonl'} rows={len(cases)}")

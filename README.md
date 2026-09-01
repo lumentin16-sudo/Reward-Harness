@@ -212,7 +212,7 @@ python -m reward_harness.benchmark \
 
 当前 winner-only runner 只使用 pairwise Prompt，支持 RewardBench，以及展开为 9 个 pair 的 RM-Bench。RewardBench 2 暂不参与评测。
 
-每个 Skill 包含 `name`、`stage`、`description` 和 `content`，`stage` 取 `G` 或 `J`。`init_skill_no_rubric` 注入 J-stage comparative workflow；`init_skill` 注入 G-stage Rubric workflow。
+每个 Skill 的 prompt-visible 核心字段是 `name`、`stage`、`description` 和 `content`，`stage` 取 `G` 或 `J`。Skill JSON 还可以包含 `intended_use`、`failure_modes`、`positive_triggers`、`negative_triggers`、`parent_skill`、`status` 和 `source_evidence`，用于描述适用条件、失败模式、来源证据和 successor 关系。`init_skill_no_rubric` 注入 J-stage comparative workflow；`init_skill` 注入 G-stage Rubric workflow。
 
 ## RewardSystem 接口
 
@@ -396,7 +396,8 @@ Harness Optimization 使用单一的 500 条 `held_in` 搜索集。四个 baseli
 第 2 步：coding agent 写 candidates
 coding agent 基于当前 top-performing/base harness 做修改
 生成 3 个新的 reward skill harness 文件：reward_harness/agents/<candidate>.py
-然后写 pending_eval.json，包含 name、file、hypothesis、axis、base_harness、components
+每个 candidate 基于轨迹决定复用 Skill、改 retrieval、派生 successor Skill，或新增 Skill
+然后写 pending_eval.json，包含 name、file、hypothesis、axis、base_harness、skill_action、reused_skills、new_skills、skill_selection_rationale、components
 
 第 3 步：candidate check
 meta-harness.py 读取 pending_eval.json

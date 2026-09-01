@@ -210,15 +210,28 @@ class RubricSet:
 # ---------------------------------------------------------------------------
 
 SkillStage = Literal["G", "J"]
+SkillStatus = Literal["seed", "experimental", "accepted", "deprecated"]
 
 @dataclass(frozen=True, slots=True)
 class Skill:
-    """可由模型选择并注入 Prompt 的静态 workflow 指令。"""
+    """可由模型选择并注入 Prompt 的可学习 workflow 经验单元。
+
+    ``content`` 是实际注入模型的干净指令。其余可选字段服务于 Harness
+    routing 和外层优化器：记录这个 Skill 适合解决什么失败模式、何时应
+    使用或避免使用、以及它从哪些轨迹经验中来。旧的四字段 JSON 仍然有效。
+    """
 
     name: str
     stage: SkillStage
     description: str
     content: str
+    intended_use: str = ""
+    failure_modes: tuple[str, ...] = ()
+    positive_triggers: tuple[str, ...] = ()
+    negative_triggers: tuple[str, ...] = ()
+    parent_skill: str | None = None
+    status: SkillStatus = "seed"
+    source_evidence: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_non_empty(self.name, "skill name")
@@ -226,6 +239,21 @@ class Skill:
             raise ValueError(f"unknown skill stage: {self.stage!r}")
         _require_non_empty(self.description, "skill description")
         _require_non_empty(self.content, "skill content")
+        if self.status not in {"seed", "experimental", "accepted", "deprecated"}:
+            raise ValueError(f"unknown skill status: {self.status!r}")
+        for field_name in (
+            "failure_modes",
+            "positive_triggers",
+            "negative_triggers",
+            "source_evidence",
+        ):
+            values = getattr(self, field_name)
+            if not isinstance(values, tuple) or any(
+                not isinstance(value, str) for value in values
+            ):
+                raise ValueError(f"{field_name} must be a tuple of strings")
+        if self.parent_skill is not None and not isinstance(self.parent_skill, str):
+            raise ValueError("parent_skill must be a string or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,13 +289,21 @@ class SkillRegistry:
         """生成模型选择 Skill 时可见的最小目录。"""
 
         return tuple(
-            {
-                "name": skill.name,
-                "stage": skill.stage,
-                "description": skill.description,
-            }
+            _compact_string_dict(
+                {
+                    "name": skill.name,
+                    "stage": skill.stage,
+                    "description": skill.description,
+                    "intended_use": skill.intended_use,
+                    "failure_modes": "; ".join(skill.failure_modes),
+                    "positive_triggers": "; ".join(skill.positive_triggers),
+                    "negative_triggers": "; ".join(skill.negative_triggers),
+                    "status": skill.status,
+                }
+            )
             for skill in self.skills
         )
+
 
     def select(self, skill_names: tuple[str, ...]) -> tuple[Skill, ...]:
         """按模型给出的顺序返回 Skill，并拒绝重复或未知名称。"""
@@ -284,6 +320,16 @@ class SkillRegistry:
             raise ValueError(f"unknown skill names: {sorted(unknown)}")
 
         return tuple(by_name[name] for name in skill_names)
+
+
+def _compact_string_dict(values: dict[str, str]) -> dict[str, str]:
+    """Drop empty optional catalog fields while preserving stable required keys."""
+
+    return {
+        key: value
+        for key, value in values.items()
+        if key in {"name", "stage", "description"} or value
+    }
 
 
 # ---------------------------------------------------------------------------

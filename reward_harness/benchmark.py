@@ -109,11 +109,29 @@ def evaluate_case(
         "query": _jsonable(case.task),
         "responses": _jsonable(case.candidates),
         "gold": _jsonable(case.gold),
+        "selected_skills": {"G": [], "J": []},
+        "skill_calls": [],
         "rubrics": None,
         "winner_result": None,
         "error": None,
     }
     judging_responses, original_id_by_anonymous_id = _anonymous_responses(case)
+    original_retrieve_skills = harness.retrieve_skills
+
+    def recording_retrieve_skills(
+        task: Any,
+        responses: tuple[Response, ...],
+        stage: Any,
+    ) -> Any:
+        skills = original_retrieve_skills(task, responses, stage)
+        payload = _jsonable(RewardSystem._skills_payload(tuple(skills)))
+        stage_key = str(stage)
+        if stage_key in outcome["selected_skills"]:
+            outcome["selected_skills"][stage_key] = payload
+        outcome["skill_calls"].append({"stage": stage_key, "skills": payload})
+        return skills
+
+    harness.retrieve_skills = recording_retrieve_skills  # type: ignore[method-assign]
 
     def build() -> RubricSet:
         rubrics = harness.build_rubrics(case.task, judging_responses)
@@ -731,7 +749,8 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
     try:
-        discovered = discover_harnesses(args.agents_dir)
+        requested_names = set(args.harnesses) if args.harnesses else None
+        discovered = discover_harnesses(args.agents_dir, include_names=requested_names)
     except (FileNotFoundError, ImportError, TypeError, ValueError) as exc:
         print(f"Failed to discover agents: {exc}", file=sys.stderr)
         return 5
